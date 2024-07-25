@@ -385,7 +385,7 @@ fn propagate_markers(mut graph: IntermediatePetGraph) -> IntermediatePetGraph {
                 .and_then(|edge| graph.edge_weight(edge.id()).cloned().flatten())
                 .and_then(|initial| {
                     edges.try_fold(initial, |mut acc, edge| {
-                        acc.or(graph.edge_weight(edge.id())?.clone()?);
+                        acc = acc.or(graph.edge_weight(edge.id())?.clone()?);
                         Some(acc)
                     })
                 })
@@ -399,7 +399,7 @@ fn propagate_markers(mut graph: IntermediatePetGraph) -> IntermediatePetGraph {
             while let Some((outgoing, _)) = walker.next(&graph) {
                 if let Some(weight) = graph.edge_weight_mut(outgoing) {
                     if let Some(weight) = weight {
-                        weight.and(marker_tree.clone());
+                        *weight = weight.clone().and(marker_tree.clone());
                     } else {
                         *weight = Some(marker_tree.clone());
                     }
@@ -468,8 +468,8 @@ fn combine_extras(graph: &IntermediatePetGraph) -> RequirementsTxtGraph {
             .find_edge(source, target)
             .and_then(|edge| next.edge_weight_mut(edge))
         {
-            if let (Some(marker), Some(ref version_marker)) = (edge.as_mut(), weight) {
-                marker.and(version_marker.clone());
+            if let (Some(marker), Some(version_marker)) = (edge.as_mut(), weight) {
+                *marker = marker.and(version_marker);
             } else {
                 *edge = None;
             }

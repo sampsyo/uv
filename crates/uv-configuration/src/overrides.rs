@@ -65,12 +65,12 @@ impl Overrides {
             // be optional for the same extra, otherwise we activate extras that should be inactive.
             Either::Right(Either::Left(overrides.iter().map(|override_requirement| {
                 // Add the extra to the override marker.
-                let mut joint_marker = MarkerTree::Expression(extra_expression.clone());
-                if let Some(marker) = &override_requirement.marker {
-                    joint_marker.and(marker.clone());
+                let mut joint_marker = MarkerTree::expression(extra_expression.clone());
+                if let Some(marker) = override_requirement.marker {
+                    joint_marker = joint_marker.and(marker);
                 }
                 Cow::Owned(Requirement {
-                    marker: Some(joint_marker.clone()),
+                    marker: Some(joint_marker),
                     ..override_requirement.clone()
                 })
             })))

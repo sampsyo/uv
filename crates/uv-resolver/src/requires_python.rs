@@ -98,6 +98,7 @@ impl RequiresPython {
         // Convert back to PEP 440 specifiers.
         let specifiers = range
             .iter()
+            .map(|(upper, lower)| (upper.as_ref(), lower.as_ref()))
             .flat_map(VersionSpecifier::from_bounds)
             .collect();
 
@@ -107,7 +108,7 @@ impl RequiresPython {
     /// Narrow the [`RequiresPython`] to the given version, if it's stricter (i.e., greater) than
     /// the current target.
     pub fn narrow(&self, target: &RequiresPythonBound) -> Option<Self> {
-        let target = VersionSpecifiers::from(VersionSpecifier::from_lower_bound(target)?);
+        let target = VersionSpecifiers::from(VersionSpecifier::from_lower_bound(target.as_ref())?);
         Self::union(std::iter::once(&target))
             .ok()
             .flatten()
@@ -211,7 +212,7 @@ impl RequiresPython {
             // tree we would generate would always evaluate to
             // `true` because every possible Python version would
             // satisfy it.
-            Bound::Unbounded => return MarkerTree::And(vec![]),
+            Bound::Unbounded => return MarkerTree::TRUE,
             Bound::Excluded(version) => (Operator::GreaterThan, version.clone().without_local()),
             Bound::Included(version) => {
                 (Operator::GreaterThanEqual, version.clone().without_local())
@@ -245,10 +246,9 @@ impl RequiresPython {
             // impossible here).
             specifier: VersionSpecifier::from_version(op, version).unwrap(),
         };
-        MarkerTree::And(vec![
-            MarkerTree::Expression(expr_python_version),
-            MarkerTree::Expression(expr_python_full_version),
-        ])
+
+        MarkerTree::expression(expr_python_version)
+            .and(MarkerTree::expression(expr_python_full_version))
     }
 
     /// Returns `false` if the wheel's tags state it can't be used in the given Python version

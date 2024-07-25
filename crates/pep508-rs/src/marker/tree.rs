@@ -1,20 +1,24 @@
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
-use std::ops::Deref;
+use std::ops::{Bound, Deref};
 use std::str::FromStr;
 
+use pubgrub::range::Range;
 #[cfg(feature = "pyo3")]
 use pyo3::{basic::CompareOp, pyclass, pymethods};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
-use pep440_rs::{Version, VersionParseError, VersionPattern, VersionSpecifier};
+use pep440_rs::{Version, VersionParseError, VersionSpecifier};
 use uv_normalize::ExtraName;
 
 use crate::cursor::Cursor;
+use crate::marker::bdd::NodeId;
 use crate::marker::parse;
 use crate::{
     MarkerEnvironment, Pep508Error, Pep508ErrorSource, Pep508Url, Reporter, TracingReporter,
 };
+
+use super::bdd::{RangeMap, Variable, BDD};
 
 /// Ways in which marker evaluation can fail
 #[derive(Debug, Eq, Hash, Ord, PartialOrd, PartialEq, Clone, Copy)]
@@ -243,26 +247,6 @@ impl MarkerOperator {
         }
     }
 
-    /// Negates this marker operator.
-    ///
-    /// If a negation doesn't exist, which is only the case for ~=, then this
-    /// returns `None`.
-    fn negate(self) -> Option<MarkerOperator> {
-        Some(match self {
-            Self::Equal => Self::NotEqual,
-            Self::NotEqual => Self::Equal,
-            Self::TildeEqual => return None,
-            Self::LessThan => Self::GreaterEqual,
-            Self::LessEqual => Self::GreaterThan,
-            Self::GreaterThan => Self::LessEqual,
-            Self::GreaterEqual => Self::LessThan,
-            Self::In => Self::NotIn,
-            Self::NotIn => Self::In,
-            Self::Contains => Self::NotContains,
-            Self::NotContains => Self::Contains,
-        })
-    }
-
     /// Inverts this marker operator.
     pub(crate) fn invert(self) -> MarkerOperator {
         match self {
@@ -277,6 +261,41 @@ impl MarkerOperator {
             Self::NotIn => Self::NotContains,
             Self::Contains => Self::In,
             Self::NotContains => Self::NotIn,
+        }
+    }
+
+    /// Returns the marker operator and value whose union represents the given range.
+    pub fn from_bounds(
+        bounds: (Bound<&String>, Bound<&String>),
+    ) -> impl Iterator<Item = (MarkerOperator, String)> {
+        let (b1, b2) = match bounds {
+            (Bound::Included(v1), Bound::Included(v2)) if v1 == v2 => {
+                (Some((MarkerOperator::Equal, v1.clone())), None)
+            }
+            (lower, upper) => (
+                MarkerOperator::from_lower_bound(lower),
+                MarkerOperator::from_upper_bound(upper),
+            ),
+        };
+
+        b1.into_iter().chain(b2)
+    }
+
+    /// Returns a value specifier representing the given lower bound.
+    pub fn from_lower_bound(bound: Bound<&String>) -> Option<(MarkerOperator, String)> {
+        match bound {
+            Bound::Included(value) => Some((MarkerOperator::GreaterEqual, value.clone())),
+            Bound::Excluded(value) => Some((MarkerOperator::GreaterThan, value.clone())),
+            Bound::Unbounded => None,
+        }
+    }
+
+    /// Returns a value specifier representing the given upper bound.
+    pub fn from_upper_bound(bound: Bound<&String>) -> Option<(MarkerOperator, String)> {
+        match bound {
+            Bound::Included(value) => Some((MarkerOperator::LessEqual, value.clone())),
+            Bound::Excluded(value) => Some((MarkerOperator::LessThan, value.clone())),
+            Bound::Unbounded => None,
         }
     }
 }
@@ -407,14 +426,6 @@ pub enum MarkerExpression {
         operator: ExtraOperator,
         name: ExtraName,
     },
-    /// An invalid or meaningless expression, such as '...' == '...'.
-    ///
-    /// Invalid expressions always evaluate to `false`, and are warned for during parsing.
-    Arbitrary {
-        l_value: MarkerValue,
-        operator: MarkerOperator,
-        r_value: MarkerValue,
-    },
 }
 
 /// The operator for an extra expression, either '==' or '!='.
@@ -434,13 +445,6 @@ impl ExtraOperator {
             _ => None,
         }
     }
-
-    fn negate(&self) -> ExtraOperator {
-        match *self {
-            ExtraOperator::Equal => ExtraOperator::NotEqual,
-            ExtraOperator::NotEqual => ExtraOperator::Equal,
-        }
-    }
 }
 
 impl Display for ExtraOperator {
@@ -454,7 +458,10 @@ impl Display for ExtraOperator {
 
 impl MarkerExpression {
     /// Parse a [`MarkerExpression`] from a string with the given reporter.
-    pub fn parse_reporter(s: &str, reporter: &mut impl Reporter) -> Result<Self, Pep508Error> {
+    pub fn parse_reporter(
+        s: &str,
+        reporter: &mut impl Reporter,
+    ) -> Result<Option<Self>, Pep508Error> {
         let mut chars = Cursor::new(s);
         let expression = parse::parse_marker_key_op_value(&mut chars, reporter)?;
         chars.eat_whitespace();
@@ -468,249 +475,12 @@ impl MarkerExpression {
                 input: chars.to_string(),
             });
         }
+
         Ok(expression)
     }
 
-    /// Negates this marker expression.
-    ///
-    /// In most cases, this returns a `MarkerTree::Expression`, but in some
-    /// cases it can be more complicated than that. For example, the negation
-    /// of a compatible version constraint is a disjunction.
-    ///
-    /// Additionally, in some cases, the negation reflects the "spirit" of what
-    /// the marker expression is. For example, the negation of an "arbitrary"
-    /// expression will still result in an expression that is always false.
-    fn negate(&self) -> MarkerTree {
-        match *self {
-            MarkerExpression::Version {
-                ref key,
-                ref specifier,
-            } => {
-                let (op, version) = (specifier.operator(), specifier.version().clone());
-                match op.negate() {
-                    None => negate_compatible_version(key.clone(), version),
-                    Some(op) => {
-                        // OK because this can only fail with either local versions,
-                        // which we avoid by construction, or if the op is ~=, which
-                        // is never the result of negating an op.
-                        let specifier =
-                            VersionSpecifier::from_version(op, version.without_local()).unwrap();
-                        let expr = MarkerExpression::Version {
-                            key: key.clone(),
-                            specifier,
-                        };
-                        MarkerTree::Expression(expr)
-                    }
-                }
-            }
-            MarkerExpression::String {
-                ref key,
-                ref operator,
-                ref value,
-            } => {
-                let expr = MarkerExpression::String {
-                    key: key.clone(),
-                    // negating ~= doesn't make sense in this context, but
-                    // I believe it is technically allowed, so we just leave
-                    // it as-is.
-                    operator: operator.negate().unwrap_or(MarkerOperator::TildeEqual),
-                    value: value.clone(),
-                };
-                MarkerTree::Expression(expr)
-            }
-            MarkerExpression::Extra {
-                ref operator,
-                ref name,
-            } => {
-                let expr = MarkerExpression::Extra {
-                    operator: operator.negate(),
-                    name: name.clone(),
-                };
-                MarkerTree::Expression(expr)
-            }
-            // "arbitrary" expressions always return false, and while the
-            // negation logically implies they should always return true, we do
-            // not do that here because it violates the spirit of a meaningly
-            // or "arbitrary" marker. We flip the operator but do nothing else.
-            MarkerExpression::Arbitrary {
-                ref l_value,
-                ref operator,
-                ref r_value,
-            } => {
-                let expr = MarkerExpression::Arbitrary {
-                    l_value: l_value.clone(),
-                    // negating ~= doesn't make sense in this context, but
-                    // I believe it is technically allowed, so we just leave
-                    // it as-is.
-                    operator: operator.negate().unwrap_or(MarkerOperator::TildeEqual),
-                    r_value: r_value.clone(),
-                };
-                MarkerTree::Expression(expr)
-            }
-        }
-    }
-
-    /// Evaluate a <`marker_value`> <`marker_op`> <`marker_value`> expression
-    ///
-    /// When `env` is `None`, all expressions that reference the environment
-    /// will evaluate as `true`.
-    fn evaluate(
-        &self,
-        env: Option<&MarkerEnvironment>,
-        extras: &[ExtraName],
-        reporter: &mut impl Reporter,
-    ) -> bool {
-        match self {
-            MarkerExpression::Version { key, specifier } => env
-                .map(|env| specifier.contains(env.get_version(key)))
-                .unwrap_or(true),
-            MarkerExpression::String {
-                key,
-                operator,
-                value,
-            } => env
-                .map(|env| {
-                    let l_string = env.get_string(key);
-                    Self::compare_strings(l_string, *operator, value, reporter)
-                })
-                .unwrap_or(true),
-            MarkerExpression::Extra {
-                operator: ExtraOperator::Equal,
-                name,
-            } => extras.contains(name),
-            MarkerExpression::Extra {
-                operator: ExtraOperator::NotEqual,
-                name,
-            } => !extras.contains(name),
-            MarkerExpression::Arbitrary { .. } => false,
-        }
-    }
-
-    /// Evaluates only the extras and python version part of the markers. We use this during
-    /// dependency resolution when we want to have packages for all possible environments but
-    /// already know the extras and the possible python versions (from `requires-python`)
-    ///
-    /// This considers only expression in the from `extra == '...'`, `'...' == extra`,
-    /// `python_version <pep PEP 440 operator> '...'` and
-    /// `'...' <pep PEP 440 operator>  python_version`.
-    ///
-    /// Note that unlike [`Self::evaluate`] this does not perform any checks for bogus expressions but
-    /// will simply return true.
-    ///
-    /// ```rust
-    /// # use std::collections::HashSet;
-    /// # use std::str::FromStr;
-    /// # use pep508_rs::{MarkerTree, Pep508Error};
-    /// # use pep440_rs::Version;
-    /// # use uv_normalize::ExtraName;
-    ///
-    /// # fn main() -> Result<(), Pep508Error> {
-    /// let marker_tree = MarkerTree::from_str(r#"("linux" in sys_platform) and extra == 'day'"#)?;
-    /// let versions: Vec<Version> = (8..12).map(|minor| Version::new([3, minor])).collect();
-    /// assert!(marker_tree.evaluate_extras_and_python_version(&[ExtraName::from_str("day").unwrap()].into(), &versions));
-    /// assert!(!marker_tree.evaluate_extras_and_python_version(&[ExtraName::from_str("night").unwrap()].into(), &versions));
-    ///
-    /// let marker_tree = MarkerTree::from_str(r#"extra == 'day' and python_version < '3.11' and '3.10' <= python_version"#)?;
-    /// assert!(!marker_tree.evaluate_extras_and_python_version(&[ExtraName::from_str("day").unwrap()].into(), &vec![Version::new([3, 9])]));
-    /// assert!(marker_tree.evaluate_extras_and_python_version(&[ExtraName::from_str("day").unwrap()].into(), &vec![Version::new([3, 10])]));
-    /// assert!(!marker_tree.evaluate_extras_and_python_version(&[ExtraName::from_str("day").unwrap()].into(), &vec![Version::new([3, 11])]));
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn evaluate_extras_and_python_version(
-        &self,
-        extras: &HashSet<ExtraName>,
-        python_versions: &[Version],
-    ) -> bool {
-        match self {
-            MarkerExpression::Version {
-                key: MarkerValueVersion::PythonVersion,
-                specifier,
-            } => python_versions
-                .iter()
-                .any(|l_version| specifier.contains(l_version)),
-            MarkerExpression::Extra {
-                operator: ExtraOperator::Equal,
-                name,
-            } => extras.contains(name),
-            MarkerExpression::Extra {
-                operator: ExtraOperator::NotEqual,
-                name,
-            } => !extras.contains(name),
-            _ => true,
-        }
-    }
-
-    /// Compare strings by PEP 508 logic, with warnings
-    fn compare_strings(
-        l_string: &str,
-        operator: MarkerOperator,
-        r_string: &str,
-        reporter: &mut impl Reporter,
-    ) -> bool {
-        match operator {
-            MarkerOperator::Equal => l_string == r_string,
-            MarkerOperator::NotEqual => l_string != r_string,
-            MarkerOperator::GreaterThan => {
-                reporter.report(
-                    MarkerWarningKind::LexicographicComparison,
-                    format!("Comparing {l_string} and {r_string} lexicographically"),
-                );
-                l_string > r_string
-            }
-            MarkerOperator::GreaterEqual => {
-                reporter.report(
-                    MarkerWarningKind::LexicographicComparison,
-                    format!("Comparing {l_string} and {r_string} lexicographically"),
-                );
-                l_string >= r_string
-            }
-            MarkerOperator::LessThan => {
-                reporter.report(
-                    MarkerWarningKind::LexicographicComparison,
-                    format!("Comparing {l_string} and {r_string} lexicographically"),
-                );
-                l_string < r_string
-            }
-            MarkerOperator::LessEqual => {
-                reporter.report(
-                    MarkerWarningKind::LexicographicComparison,
-                    format!("Comparing {l_string} and {r_string} lexicographically"),
-                );
-                l_string <= r_string
-            }
-            MarkerOperator::TildeEqual => {
-                reporter.report(
-                    MarkerWarningKind::LexicographicComparison,
-                    format!("Can't compare {l_string} and {r_string} with `~=`"),
-                );
-                false
-            }
-            MarkerOperator::In => r_string.contains(l_string),
-            MarkerOperator::NotIn => !r_string.contains(l_string),
-            MarkerOperator::Contains => l_string.contains(r_string),
-            MarkerOperator::NotContains => !l_string.contains(r_string),
-        }
-    }
-
-    /// Creates an instance of [`MarkerExpression::Arbitrary`] with the given values.
-    pub(crate) fn arbitrary(
-        l_value: MarkerValue,
-        operator: MarkerOperator,
-        r_value: MarkerValue,
-    ) -> MarkerExpression {
-        MarkerExpression::Arbitrary {
-            l_value,
-            operator,
-            r_value,
-        }
-    }
-}
-
-impl FromStr for MarkerExpression {
-    type Err = Pep508Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    /// Parse a [`MarkerExpression`] from a string.
+    pub fn from_str(s: &str) -> Result<Option<Self>, Pep508Error> {
         MarkerExpression::parse_reporter(s, &mut TracingReporter)
     }
 }
@@ -743,29 +513,13 @@ impl Display for MarkerExpression {
             MarkerExpression::Extra { operator, name } => {
                 write!(f, "extra {operator} '{name}'")
             }
-            MarkerExpression::Arbitrary {
-                l_value,
-                operator,
-                r_value,
-            } => {
-                write!(f, "{l_value} {operator} {r_value}")
-            }
         }
     }
 }
 
 /// Represents one of the nested marker expressions with and/or/parentheses
-#[derive(Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
-pub enum MarkerTree {
-    /// A simple expression such as `python_version > "3.8"`
-    Expression(MarkerExpression),
-    /// An and between nested expressions, such as
-    /// `python_version > "3.8" and implementation_name == 'cpython'`
-    And(Vec<MarkerTree>),
-    /// An or between nested expressions, such as
-    /// `python_version > "3.8" or implementation_name == 'cpython'`
-    Or(Vec<MarkerTree>),
-}
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+pub struct MarkerTree(NodeId);
 
 impl<'de> Deserialize<'de> for MarkerTree {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -808,9 +562,56 @@ impl MarkerTree {
         parse::parse_markers(markers, reporter)
     }
 
-    /// Whether the marker is `MarkerTree::And(Vec::new())`.
-    pub fn is_universal(&self) -> bool {
-        self == &MarkerTree::And(Vec::new())
+    /// A marker that always evaluates to `true`.
+    pub const TRUE: MarkerTree = MarkerTree(NodeId::TRUE);
+
+    /// A marker that always evaluates to `false`.
+    pub const FALSE: MarkerTree = MarkerTree(NodeId::FALSE);
+
+    /// Returns a marker tree from a single expression.
+    pub fn expression(expr: MarkerExpression) -> MarkerTree {
+        MarkerTree(BDD.terminal(expr))
+    }
+
+    /// Whether the marker always evaluates to `true`.
+    pub fn is_true(&self) -> bool {
+        self.0.is_true()
+    }
+
+    /// Whether the marker always evaluates to `false`, i.e. the expression is not satisfiable
+    /// in any environment.
+    pub fn is_false(&self) -> bool {
+        self.0.is_false()
+    }
+
+    /// Returns `true` if there is no environment in which both marker trees can both
+    /// apply, i.e. the expression `first and second` is always false.
+    pub fn is_disjoint_with(&self, tree: MarkerTree) -> bool {
+        self.and(tree).is_false()
+    }
+
+    /// Returns a new marker tree that is the negation of this one.
+    #[must_use]
+    pub fn negate(&self) -> MarkerTree {
+        MarkerTree(self.0.not())
+    }
+
+    /// Combine this marker tree with the one given via a conjunction.
+    ///
+    /// This does some shallow flattening. That is, if `self` is a conjunction
+    /// already, then `tree` is added to it instead of creating a new
+    /// conjunction.
+    pub fn and(self, tree: MarkerTree) -> MarkerTree {
+        MarkerTree(BDD.and(self.0, tree.0))
+    }
+
+    /// Combine this marker tree with the one given via a disjunction.
+    ///
+    /// This does some shallow flattening. That is, if `self` is a disjunction
+    /// already, then `tree` is added to it instead of creating a new
+    /// disjunction.
+    pub fn or(self, tree: MarkerTree) -> MarkerTree {
+        MarkerTree(BDD.or(self.0, tree.0))
     }
 
     /// Does this marker apply in the given environment?
@@ -831,116 +632,7 @@ impl MarkerTree {
         extras: &[ExtraName],
     ) -> bool {
         self.report_deprecated_options(&mut TracingReporter);
-        match self {
-            Self::Expression(expression) => expression.evaluate(env, extras, &mut TracingReporter),
-            Self::And(expressions) => expressions
-                .iter()
-                .all(|x| x.evaluate_reporter_impl(env, extras, &mut TracingReporter)),
-            Self::Or(expressions) => expressions
-                .iter()
-                .any(|x| x.evaluate_reporter_impl(env, extras, &mut TracingReporter)),
-        }
-    }
-
-    /// Remove the extras from a marker, returning `None` if the marker tree evaluates to `true`.
-    ///
-    /// Any `extra` markers that are always `true` given the provided extras will be removed.
-    /// Any `extra` markers that are always `false` given the provided extras will be left
-    /// unchanged.
-    ///
-    /// For example, if `dev` is a provided extra, given `sys_platform == 'linux' and extra == 'dev'`,
-    /// the marker will be simplified to `sys_platform == 'linux'`.
-    pub fn simplify_extras(self, extras: &[ExtraName]) -> Option<MarkerTree> {
-        self.simplify_extras_with(|name| extras.contains(name))
-    }
-
-    /// Remove the extras from a marker, returning `None` if the marker tree evaluates to `true`.
-    ///
-    /// Any `extra` markers that are always `true` given the provided predicate will be removed.
-    /// Any `extra` markers that are always `false` given the provided predicate will be left
-    /// unchanged.
-    ///
-    /// For example, if `is_extra('dev')` is true, given
-    /// `sys_platform == 'linux' and extra == 'dev'`, the marker will be simplified to
-    /// `sys_platform == 'linux'`.
-    pub fn simplify_extras_with(self, is_extra: impl Fn(&ExtraName) -> bool) -> Option<MarkerTree> {
-        // Because `simplify_extras_with_impl` is recursive, and we need to use
-        // our predicate in recursive calls, we need the predicate itself to
-        // have some indirection (or else we'd have to clone it). To avoid a
-        // recursive type at codegen time, we just introduce the indirection
-        // here, but keep the calling API ergonomic.
-        self.simplify_extras_with_impl(&is_extra)
-    }
-
-    fn simplify_extras_with_impl(
-        self,
-        is_extra: &impl Fn(&ExtraName) -> bool,
-    ) -> Option<MarkerTree> {
-        /// Returns `true` if the given expression is always `true` given the set of extras.
-        fn is_true(expression: &MarkerExpression, is_extra: impl Fn(&ExtraName) -> bool) -> bool {
-            match expression {
-                MarkerExpression::Extra {
-                    operator: ExtraOperator::Equal,
-                    name,
-                } => is_extra(name),
-                MarkerExpression::Extra {
-                    operator: ExtraOperator::NotEqual,
-                    name,
-                } => !is_extra(name),
-                _ => false,
-            }
-        }
-
-        match self {
-            Self::Expression(expression) => {
-                // If the expression is true, we can remove the marker entirely.
-                if is_true(&expression, is_extra) {
-                    None
-                } else {
-                    // If not, return the original marker.
-                    Some(Self::Expression(expression))
-                }
-            }
-            Self::And(expressions) => {
-                // Remove any expressions that are _true_ due to the presence of an extra.
-                let simplified = expressions
-                    .into_iter()
-                    .filter_map(|marker| marker.simplify_extras_with_impl(is_extra))
-                    .collect::<Vec<_>>();
-
-                // If there are no expressions left, return None.
-                if simplified.is_empty() {
-                    None
-                } else if simplified.len() == 1 {
-                    // If there is only one expression left, return the remaining expression.
-                    simplified.into_iter().next()
-                } else {
-                    // If there are still expressions left, return the simplified marker.
-                    Some(Self::And(simplified))
-                }
-            }
-            Self::Or(expressions) => {
-                let num_expressions = expressions.len();
-
-                // Remove any expressions that are _true_ due to the presence of an extra.
-                let simplified = expressions
-                    .into_iter()
-                    .filter_map(|marker| marker.simplify_extras_with_impl(is_extra))
-                    .collect::<Vec<_>>();
-
-                // If _any_ of the expressions are true (i.e., if any of the markers were filtered
-                // out in the above filter step), the entire marker is true.
-                if simplified.len() < num_expressions {
-                    None
-                } else if simplified.len() == 1 {
-                    // If there is only one expression left, return the remaining expression.
-                    simplified.into_iter().next()
-                } else {
-                    // If there are still expressions left, return the simplified marker.
-                    Some(Self::Or(simplified))
-                }
-            }
-        }
+        self.evaluate_reporter_impl(env, extras, &mut TracingReporter)
     }
 
     /// Same as [`Self::evaluate`], but instead of using logging to warn, you can pass your own
@@ -961,15 +653,81 @@ impl MarkerTree {
         extras: &[ExtraName],
         reporter: &mut impl Reporter,
     ) -> bool {
-        match self {
-            Self::Expression(expression) => expression.evaluate(env, extras, reporter),
-            Self::And(expressions) => expressions
-                .iter()
-                .all(|x| x.evaluate_reporter_impl(env, extras, reporter)),
-            Self::Or(expressions) => expressions
-                .iter()
-                .any(|x| x.evaluate_reporter_impl(env, extras, reporter)),
+        match self.kind() {
+            MarkerTreeKind::True => return true,
+            MarkerTreeKind::False => return false,
+            MarkerTreeKind::Version(marker) => {
+                for (range, tree) in marker.children() {
+                    if env
+                        .map(|env| range.contains(env.get_version(marker.key())))
+                        .unwrap_or(true)
+                    {
+                        return tree.evaluate_optional_environment(env, extras);
+                    }
+                }
+            }
+            MarkerTreeKind::String(marker) => {
+                for (range, tree) in marker.children() {
+                    if env
+                        .map(|env| {
+                            let l_string = env.get_string(marker.key());
+
+                            if range.as_singleton().is_none() {
+                                if let Some((start, end)) = range.bounding_range() {
+                                    if let Bound::Included(value) | Bound::Excluded(value) = start {
+                                        reporter.report(
+                                            MarkerWarningKind::LexicographicComparison,
+                                            format!(
+                                                "Comparing {l_string} and {value} lexicographically"
+                                            ),
+                                        );
+                                    };
+
+                                    if let Bound::Included(value) | Bound::Excluded(value) = end {
+                                        reporter.report(
+                                            MarkerWarningKind::LexicographicComparison,
+                                            format!(
+                                                "Comparing {l_string} and {value} lexicographically"
+                                            ),
+                                        );
+                                    };
+                                }
+                            }
+
+                            // todo(ibraheem)
+                            let l_string = &l_string.to_string();
+                            range.contains(l_string)
+                        })
+                        .unwrap_or(true)
+                    {
+                        return tree.evaluate_optional_environment(env, extras);
+                    }
+                }
+            }
+            MarkerTreeKind::In(marker) => {
+                let value = env
+                    .map(|env| marker.value().contains(env.get_string(marker.key())))
+                    .unwrap_or(true);
+                return marker
+                    .edge(value)
+                    .evaluate_optional_environment(env, extras);
+            }
+            MarkerTreeKind::Contains(marker) => {
+                let value = env
+                    .map(|env| env.get_string(marker.key()).contains(marker.value()))
+                    .unwrap_or(true);
+                return marker
+                    .edge(value)
+                    .evaluate_optional_environment(env, extras);
+            }
+            MarkerTreeKind::Extra(marker) => {
+                return marker
+                    .edge(extras.contains(marker.name()))
+                    .evaluate_optional_environment(env, extras);
+            }
         }
+
+        false
     }
 
     /// Checks if the requirement should be activated with the given set of active extras and a set
@@ -985,16 +743,33 @@ impl MarkerTree {
         extras: &HashSet<ExtraName>,
         python_versions: &[Version],
     ) -> bool {
-        match self {
-            Self::Expression(expression) => {
-                expression.evaluate_extras_and_python_version(extras, python_versions)
-            }
-            Self::And(expressions) => expressions
-                .iter()
-                .all(|x| x.evaluate_extras_and_python_version(extras, python_versions)),
-            Self::Or(expressions) => expressions
-                .iter()
-                .any(|x| x.evaluate_extras_and_python_version(extras, python_versions)),
+        match self.kind() {
+            MarkerTreeKind::True => true,
+            MarkerTreeKind::False => false,
+            MarkerTreeKind::Version(marker) => marker.children().any(|(range, tree)| {
+                if *marker.key() == MarkerValueVersion::PythonVersion {
+                    if !python_versions
+                        .iter()
+                        .any(|version| range.contains(version))
+                    {
+                        return false;
+                    }
+                }
+
+                tree.evaluate_extras_and_python_version(extras, python_versions)
+            }),
+            MarkerTreeKind::String(marker) => marker
+                .children()
+                .any(|(_, tree)| tree.evaluate_extras_and_python_version(extras, python_versions)),
+            MarkerTreeKind::In(marker) => marker
+                .children()
+                .any(|(_, tree)| tree.evaluate_extras_and_python_version(extras, python_versions)),
+            MarkerTreeKind::Contains(marker) => marker
+                .children()
+                .any(|(_, tree)| tree.evaluate_extras_and_python_version(extras, python_versions)),
+            MarkerTreeKind::Extra(marker) => marker
+                .edge(extras.contains(marker.name()))
+                .evaluate_extras_and_python_version(extras, python_versions),
         }
     }
 
@@ -1016,131 +791,264 @@ impl MarkerTree {
 
     /// Report the deprecated marker from <https://peps.python.org/pep-0345/#environment-markers>
     fn report_deprecated_options(&self, reporter: &mut impl Reporter) {
-        match self {
-            Self::Expression(expression) => {
-                let MarkerExpression::String { key, .. } = expression else {
-                    return;
+        let string_marker = match self.kind() {
+            MarkerTreeKind::True | MarkerTreeKind::False => return,
+            MarkerTreeKind::String(marker) => marker,
+            MarkerTreeKind::Version(marker) => {
+                for (_, tree) in marker.children() {
+                    tree.report_deprecated_options(reporter);
+                }
+                return;
+            }
+            MarkerTreeKind::In(marker) => {
+                for (_, tree) in marker.children() {
+                    tree.report_deprecated_options(reporter);
+                }
+                return;
+            }
+            MarkerTreeKind::Contains(marker) => {
+                for (_, tree) in marker.children() {
+                    tree.report_deprecated_options(reporter);
+                }
+                return;
+            }
+            MarkerTreeKind::Extra(marker) => {
+                for (_, tree) in marker.children() {
+                    tree.report_deprecated_options(reporter);
+                }
+                return;
+            }
+        };
+
+        match string_marker.key() {
+            MarkerValueString::OsNameDeprecated => {
+                reporter.report(
+                    MarkerWarningKind::DeprecatedMarkerName,
+                    "os.name is deprecated in favor of os_name".to_string(),
+                );
+            }
+            MarkerValueString::PlatformMachineDeprecated => {
+                reporter.report(
+                    MarkerWarningKind::DeprecatedMarkerName,
+                    "platform.machine is deprecated in favor of platform_machine".to_string(),
+                );
+            }
+            MarkerValueString::PlatformPythonImplementationDeprecated => {
+                reporter.report(
+                    MarkerWarningKind::DeprecatedMarkerName,
+                    "platform.python_implementation is deprecated in favor of
+                        platform_python_implementation"
+                        .to_string(),
+                );
+            }
+            MarkerValueString::PythonImplementationDeprecated => {
+                reporter.report(
+                    MarkerWarningKind::DeprecatedMarkerName,
+                    "python_implementation is deprecated in favor of
+                        platform_python_implementation"
+                        .to_string(),
+                );
+            }
+            MarkerValueString::PlatformVersionDeprecated => {
+                reporter.report(
+                    MarkerWarningKind::DeprecatedMarkerName,
+                    "platform.version is deprecated in favor of platform_version".to_string(),
+                );
+            }
+            MarkerValueString::SysPlatformDeprecated => {
+                reporter.report(
+                    MarkerWarningKind::DeprecatedMarkerName,
+                    "sys.platform  is deprecated in favor of sys_platform".to_string(),
+                );
+            }
+            _ => {}
+        }
+
+        for (_, tree) in string_marker.children() {
+            tree.report_deprecated_options(reporter);
+        }
+    }
+
+    pub fn kind(&self) -> MarkerTreeKind<'_> {
+        if self.is_true() {
+            return MarkerTreeKind::True;
+        }
+
+        if self.is_false() {
+            return MarkerTreeKind::False;
+        }
+
+        let node = BDD.node(self.0);
+        match &node.var {
+            Variable::Version(key) => {
+                let RangeMap::Version { ref map } = node.children else {
+                    unreachable!()
                 };
-
-                match key {
-                    MarkerValueString::OsNameDeprecated => {
-                        reporter.report(
-                            MarkerWarningKind::DeprecatedMarkerName,
-                            "os.name is deprecated in favor of os_name".to_string(),
-                        );
-                    }
-                    MarkerValueString::PlatformMachineDeprecated => {
-                        reporter.report(
-                            MarkerWarningKind::DeprecatedMarkerName,
-                            "platform.machine is deprecated in favor of platform_machine"
-                                .to_string(),
-                        );
-                    }
-                    MarkerValueString::PlatformPythonImplementationDeprecated => {
-                        reporter.report(
-                            MarkerWarningKind::DeprecatedMarkerName,
-                            "platform.python_implementation is deprecated in favor of platform_python_implementation".to_string(),
-                        );
-                    }
-                    MarkerValueString::PythonImplementationDeprecated => {
-                        reporter.report(
-                            MarkerWarningKind::DeprecatedMarkerName,
-                            "python_implementation is deprecated in favor of platform_python_implementation".to_string(),
-                        );
-                    }
-                    MarkerValueString::PlatformVersionDeprecated => {
-                        reporter.report(
-                            MarkerWarningKind::DeprecatedMarkerName,
-                            "platform.version is deprecated in favor of platform_version"
-                                .to_string(),
-                        );
-                    }
-                    MarkerValueString::SysPlatformDeprecated => {
-                        reporter.report(
-                            MarkerWarningKind::DeprecatedMarkerName,
-                            "sys.platform  is deprecated in favor of sys_platform".to_string(),
-                        );
-                    }
-                    _ => {}
-                }
+                MarkerTreeKind::Version(VersionMarkerTree {
+                    id: self.0,
+                    key: key.clone(),
+                    map,
+                })
             }
-            Self::And(expressions) => {
-                for expression in expressions {
-                    expression.report_deprecated_options(reporter);
-                }
+            Variable::String(key) => {
+                let RangeMap::String { ref map } = node.children else {
+                    unreachable!()
+                };
+                MarkerTreeKind::String(StringMarkerTree {
+                    id: self.0,
+                    key: key.clone(),
+                    map,
+                })
             }
-            Self::Or(expressions) => {
-                for expression in expressions {
-                    expression.report_deprecated_options(reporter);
-                }
+            Variable::In { key, value } => {
+                let RangeMap::Boolean { low, high } = node.children else {
+                    unreachable!()
+                };
+                MarkerTreeKind::In(InMarkerTree {
+                    key: key.clone(),
+                    value,
+                    low: low.negate(self.0),
+                    high: high.negate(self.0),
+                })
+            }
+            Variable::Contains { key, value } => {
+                let RangeMap::Boolean { low, high } = node.children else {
+                    unreachable!()
+                };
+                MarkerTreeKind::Contains(ContainsMarkerTree {
+                    key: key.clone(),
+                    value,
+                    low: low.negate(self.0),
+                    high: high.negate(self.0),
+                })
+            }
+            Variable::Extra(name) => {
+                let RangeMap::Boolean { low, high } = node.children else {
+                    unreachable!()
+                };
+                MarkerTreeKind::Extra(ExtraMarkerTree {
+                    name,
+                    low: low.negate(self.0),
+                    high: high.negate(self.0),
+                })
             }
         }
     }
 
-    /// Returns a new marker tree that is the negation of this one.
-    #[must_use]
-    pub fn negate(&self) -> MarkerTree {
-        match *self {
-            MarkerTree::Expression(ref expr) => expr.negate(),
-            MarkerTree::And(ref trees) => {
-                let mut negated = MarkerTree::Or(Vec::with_capacity(trees.len()));
-                for tree in trees {
-                    negated.or(tree.negate());
+    /// Returns a DNF boolean expression for this marker tree.
+    pub fn to_dnf(self) -> Vec<Vec<MarkerExpression>> {
+        pub(crate) fn collect(
+            tree: MarkerTree,
+            dnf: &mut Vec<Vec<MarkerExpression>>,
+            path: &mut Vec<MarkerExpression>,
+        ) {
+            match tree.kind() {
+                MarkerTreeKind::False => {
+                    return;
                 }
-                negated
-            }
-            MarkerTree::Or(ref trees) => {
-                let mut negated = MarkerTree::And(Vec::with_capacity(trees.len()));
-                for tree in trees {
-                    negated.and(tree.negate());
+                MarkerTreeKind::True => {
+                    dnf.push(path.clone());
+                    path.pop();
                 }
-                negated
-            }
-        }
-    }
+                MarkerTreeKind::Version(marker) => {
+                    for (range, tree) in marker.children() {
+                        let current = path.len();
+                        let bounds = range.bounding_range().unwrap();
 
-    /// Combine this marker tree with the one given via a conjunction.
-    ///
-    /// This does some shallow flattening. That is, if `self` is a conjunction
-    /// already, then `tree` is added to it instead of creating a new
-    /// conjunction.
-    pub fn and(&mut self, tree: MarkerTree) {
-        match *self {
-            MarkerTree::Expression(_) | MarkerTree::Or(_) => {
-                let this = std::mem::replace(self, MarkerTree::And(vec![]));
-                *self = MarkerTree::And(vec![this]);
-            }
-            MarkerTree::And(_) => {}
-        }
-        if let MarkerTree::And(ref mut exprs) = *self {
-            if let MarkerTree::And(tree) = tree {
-                exprs.extend(tree);
-            } else {
-                exprs.push(tree);
-            }
-        }
-    }
+                        for specifier in VersionSpecifier::from_bounds(bounds) {
+                            let expr = MarkerExpression::Version {
+                                key: marker.key().clone(),
+                                specifier,
+                            };
 
-    /// Combine this marker tree with the one given via a disjunction.
-    ///
-    /// This does some shallow flattening. That is, if `self` is a disjunction
-    /// already, then `tree` is added to it instead of creating a new
-    /// disjunction.
-    pub fn or(&mut self, tree: MarkerTree) {
-        match *self {
-            MarkerTree::Expression(_) | MarkerTree::And(_) => {
-                let this = std::mem::replace(self, MarkerTree::And(vec![]));
-                *self = MarkerTree::Or(vec![this]);
+                            path.push(expr);
+                        }
+
+                        collect(tree, dnf, path);
+                        path.truncate(current);
+                    }
+                }
+                MarkerTreeKind::String(marker) => {
+                    for (range, tree) in marker.children() {
+                        let current = path.len();
+                        let bounds = range.bounding_range().unwrap();
+
+                        for (operator, value) in MarkerOperator::from_bounds(bounds) {
+                            let expr = MarkerExpression::String {
+                                key: marker.key().clone(),
+                                operator,
+                                value,
+                            };
+
+                            path.push(expr);
+                        }
+
+                        collect(tree, dnf, path);
+                        path.truncate(current);
+                    }
+                }
+                MarkerTreeKind::In(marker) => {
+                    for (value, tree) in marker.children() {
+                        let operator = if value {
+                            MarkerOperator::In
+                        } else {
+                            MarkerOperator::NotIn
+                        };
+
+                        let expr = MarkerExpression::String {
+                            key: marker.key().clone(),
+                            value: marker.value().to_owned(),
+                            operator,
+                        };
+
+                        path.push(expr);
+                        collect(tree, dnf, path);
+                        path.pop();
+                    }
+                }
+                MarkerTreeKind::Contains(marker) => {
+                    for (value, tree) in marker.children() {
+                        let operator = if value {
+                            MarkerOperator::Contains
+                        } else {
+                            MarkerOperator::NotContains
+                        };
+
+                        let expr = MarkerExpression::String {
+                            key: marker.key().clone(),
+                            value: marker.value().to_owned(),
+                            operator,
+                        };
+
+                        path.push(expr);
+                        collect(tree, dnf, path);
+                        path.pop();
+                    }
+                }
+                MarkerTreeKind::Extra(marker) => {
+                    for (value, tree) in marker.children() {
+                        let operator = if value {
+                            ExtraOperator::Equal
+                        } else {
+                            ExtraOperator::NotEqual
+                        };
+
+                        let expr = MarkerExpression::Extra {
+                            name: marker.name().clone(),
+                            operator,
+                        };
+
+                        path.push(expr);
+                        collect(tree, dnf, path);
+                        path.pop();
+                    }
+                }
             }
-            MarkerTree::Or(_) => {}
         }
-        if let MarkerTree::Or(ref mut exprs) = *self {
-            if let MarkerTree::Or(tree) = tree {
-                exprs.extend(tree);
-            } else {
-                exprs.push(tree);
-            }
-        }
+
+        let mut dnf = Vec::new();
+        collect(self, &mut dnf, &mut Vec::new());
+        dnf
     }
 
     /// Find a top level `extra == "..."` expression.
@@ -1148,88 +1056,230 @@ impl MarkerTree {
     /// ASSUMPTION: There is one `extra = "..."`, and it's either the only marker or part of the
     /// main conjunction.
     pub fn top_level_extra(&self) -> Option<&MarkerExpression> {
-        match &self {
-            MarkerTree::Expression(extra_expression @ MarkerExpression::Extra { .. }) => {
-                Some(extra_expression)
-            }
-            MarkerTree::And(and) => and.iter().find_map(|marker| {
-                if let MarkerTree::Expression(extra_expression @ MarkerExpression::Extra { .. }) =
-                    marker
-                {
-                    Some(extra_expression)
-                } else {
-                    None
-                }
-            }),
-            MarkerTree::Expression(_) | MarkerTree::Or(_) => None,
+        todo!()
+
+        // match &self {
+        //     MarkerTree::Expression(extra_expression @ MarkerExpression::Extra { .. }) => {
+        //         Some(extra_expression)
+        //     }
+        //     MarkerTree::And(and) => and.iter().find_map(|marker| {
+        //         if let MarkerTree::Expression(
+        //             extra_expression @ MarkerExpression::Extra { .. },
+        //         ) = marker
+        //         {
+        //             Some(extra_expression)
+        //         } else {
+        //             None
+        //         }
+        //     }),
+        //     MarkerTree::Expression(_) | MarkerTree::Or(_) => None,
+        // }
+    }
+
+    /// Remove the extras from a marker, returning `None` if the marker tree evaluates to `true`.
+    ///
+    /// Any `extra` markers that are always `true` given the provided extras will be removed.
+    /// Any `extra` markers that are always `false` given the provided extras will be left
+    /// unchanged.
+    ///
+    /// For example, if `dev` is a provided extra, given `sys_platform == 'linux' and extra == 'dev'`,
+    /// the marker will be simplified to `sys_platform == 'linux'`.
+    pub fn simplify_extras(self, extras: &[ExtraName]) -> MarkerTree {
+        self.simplify_extras_with(|name| extras.contains(name))
+    }
+
+    /// Remove the extras from a marker, returning `None` if the marker tree evaluates to `true`.
+    ///
+    /// Any `extra` markers that are always `true` given the provided predicate will be removed.
+    /// Any `extra` markers that are always `false` given the provided predicate will be left
+    /// unchanged.
+    ///
+    /// For example, if `is_extra('dev')` is true, given
+    /// `sys_platform == 'linux' and extra == 'dev'`, the marker will be simplified to
+    /// `sys_platform == 'linux'`.
+    pub fn simplify_extras_with(self, is_extra: impl Fn(&ExtraName) -> bool) -> MarkerTree {
+        // Because `simplify_extras_with_impl` is recursive, and we need to use
+        // our predicate in recursive calls, we need the predicate itself to
+        // have some indirection (or else we'd have to clone it). To avoid a
+        // recursive type at codegen time, we just introduce the indirection
+        // here, but keep the calling API ergonomic.
+        self.simplify_extras_with_impl(&is_extra)
+    }
+
+    fn simplify_extras_with_impl(self, is_extra: &impl Fn(&ExtraName) -> bool) -> MarkerTree {
+        MarkerTree(BDD.restrict(self.0, |var| match var {
+            Variable::Extra(name) => is_extra(name).then_some(true),
+            _ => None,
+        }))
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum MarkerTreeKind<'a> {
+    True,
+    False,
+    Version(VersionMarkerTree<'a>),
+    String(StringMarkerTree<'a>),
+    In(InMarkerTree<'a>),
+    Contains(ContainsMarkerTree<'a>),
+    Extra(ExtraMarkerTree<'a>),
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct VersionMarkerTree<'a> {
+    id: NodeId,
+    key: MarkerValueVersion,
+    map: &'a [(Range<Version>, NodeId)],
+}
+
+impl VersionMarkerTree<'_> {
+    pub fn key(&self) -> &MarkerValueVersion {
+        &self.key
+    }
+
+    pub fn children(&self) -> impl Iterator<Item = (&Range<Version>, MarkerTree)> + '_ {
+        self.map
+            .iter()
+            .map(|(range, node)| (range, MarkerTree(node.negate(self.id))))
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct StringMarkerTree<'a> {
+    id: NodeId,
+    key: MarkerValueString,
+    map: &'a [(Range<String>, NodeId)],
+}
+
+impl StringMarkerTree<'_> {
+    pub fn key(&self) -> &MarkerValueString {
+        &self.key
+    }
+
+    pub fn children(&self) -> impl Iterator<Item = (&Range<String>, MarkerTree)> {
+        self.map
+            .iter()
+            .map(|(range, node)| (range, MarkerTree(node.negate(self.id))))
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct InMarkerTree<'a> {
+    key: MarkerValueString,
+    value: &'a str,
+    low: NodeId,
+    high: NodeId,
+}
+
+impl InMarkerTree<'_> {
+    pub fn key(&self) -> &MarkerValueString {
+        &self.key
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn children(&self) -> impl Iterator<Item = (bool, MarkerTree)> {
+        [(false, MarkerTree(self.low)), (true, MarkerTree(self.high))].into_iter()
+    }
+
+    pub fn edge(&self, value: bool) -> MarkerTree {
+        if value {
+            MarkerTree(self.high)
+        } else {
+            MarkerTree(self.low)
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct ContainsMarkerTree<'a> {
+    key: MarkerValueString,
+    value: &'a str,
+    low: NodeId,
+    high: NodeId,
+}
+
+impl ContainsMarkerTree<'_> {
+    pub fn key(&self) -> &MarkerValueString {
+        &self.key
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn children(&self) -> impl Iterator<Item = (bool, MarkerTree)> {
+        [(false, MarkerTree(self.low)), (true, MarkerTree(self.high))].into_iter()
+    }
+
+    pub fn edge(&self, value: bool) -> MarkerTree {
+        if value {
+            MarkerTree(self.high)
+        } else {
+            MarkerTree(self.low)
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct ExtraMarkerTree<'a> {
+    name: &'a ExtraName,
+    low: NodeId,
+    high: NodeId,
+}
+
+impl ExtraMarkerTree<'_> {
+    pub fn name(&self) -> &ExtraName {
+        self.name
+    }
+
+    pub fn children(&self) -> impl Iterator<Item = (bool, MarkerTree)> {
+        [(false, MarkerTree(self.low)), (true, MarkerTree(self.high))].into_iter()
+    }
+
+    pub fn edge(&self, value: bool) -> MarkerTree {
+        if value {
+            MarkerTree(self.high)
+        } else {
+            MarkerTree(self.low)
         }
     }
 }
 
 impl Display for MarkerTree {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let format_inner = |expression: &Self| {
-            if matches!(expression, Self::Expression(_)) {
-                format!("{expression}")
-            } else {
-                format!("({expression})")
-            }
-        };
-        match self {
-            Self::Expression(expression) => write!(f, "{expression}"),
-            Self::And(and_list) => f.write_str(
-                &and_list
-                    .iter()
-                    .map(format_inner)
-                    .collect::<Vec<String>>()
-                    .join(" and "),
-            ),
-            Self::Or(or_list) => f.write_str(
-                &or_list
-                    .iter()
-                    .map(format_inner)
-                    .collect::<Vec<String>>()
-                    .join(" or "),
-            ),
+        if self.is_true() || self.is_false() {
+            return Ok(());
         }
-    }
-}
 
-/// Negates a compatible version marker expression, from its component parts.
-///
-/// Here, we consider `key ~= V.N` to be equivalent to
-/// `key >= V.N and key == V.*`. So the negation returned is
-/// `key < V.N or key != V.*`.
-fn negate_compatible_version(key: MarkerValueVersion, version: Version) -> MarkerTree {
-    assert!(
-        version.release().len() > 1,
-        "~= requires more than 1 release version number"
-    );
-    // I believe we're already guaranteed that this is true,
-    // because we're only here if this version was combined
-    // with ~=, which cannot be used with local versions anyway.
-    // But this ensures correctness and should be pretty cheap.
-    let version = version.without_local();
-    let pattern = VersionPattern::wildcard(Version::new(
-        &version.release()[..version.release().len() - 1],
-    ));
-    // OK because this can only fail for local versions or when using
-    // ~=, but neither is the case here.
-    let disjunct1 = VersionSpecifier::from_version(pep440_rs::Operator::LessThan, version).unwrap();
-    // And this is OK because it only fails if the above would fail
-    // (which we know it doesn't) or if the operator is not compatible
-    // with wildcards, but != is.
-    let disjunct2 = VersionSpecifier::from_pattern(pep440_rs::Operator::NotEqual, pattern).unwrap();
-    MarkerTree::Or(vec![
-        MarkerTree::Expression(MarkerExpression::Version {
-            key: key.clone(),
-            specifier: disjunct1,
-        }),
-        MarkerTree::Expression(MarkerExpression::Version {
-            key,
-            specifier: disjunct2,
-        }),
-    ])
+        let dnf = self.to_dnf();
+        let format_conjunction = |conjunction: &Vec<MarkerExpression>| {
+            conjunction
+                .iter()
+                .map(|expr| expr.to_string())
+                .collect::<Vec<String>>()
+                .join(" and ")
+        };
+
+        let expr = match &dnf[..] {
+            [conjunction] => format_conjunction(conjunction),
+            _ => dnf
+                .iter()
+                .map(|conjunction| {
+                    if conjunction.len() == 1 {
+                        format_conjunction(conjunction)
+                    } else {
+                        format!("({})", format_conjunction(conjunction))
+                    }
+                })
+                .collect::<Vec<String>>()
+                .join(" or "),
+        };
+
+        f.write_str(&expr)
+    }
 }
 
 #[cfg(test)]
@@ -1237,14 +1287,10 @@ mod test {
     use std::str::FromStr;
 
     use insta::assert_snapshot;
-
-    use pep440_rs::VersionSpecifier;
     use uv_normalize::ExtraName;
 
-    use crate::marker::{ExtraOperator, MarkerEnvironment, MarkerEnvironmentBuilder};
-    use crate::{
-        MarkerExpression, MarkerOperator, MarkerTree, MarkerValueString, MarkerValueVersion,
-    };
+    use crate::marker::{MarkerEnvironment, MarkerEnvironmentBuilder};
+    use crate::{MarkerExpression, MarkerOperator, MarkerTree, MarkerValueString};
 
     fn parse_err(input: &str) -> String {
         MarkerTree::from_str(input).unwrap_err().to_string()
@@ -1313,6 +1359,11 @@ mod test {
 
         assert_eq!(neg("python_version > '3.6'"), "python_version <= '3.6'");
         assert_eq!(neg("'3.6' < python_version"), "python_version <= '3.6'");
+
+        assert_eq!(
+            neg("python_version != '3.6.*' and os_name == 'Linux'"),
+            "python_version == '3.6.* or os_name != 'Linux''"
+        );
 
         assert_eq!(
             neg("python_version == '3.6.*'"),
@@ -1477,11 +1528,12 @@ mod test {
         assert_eq!(warnings, &[]);
         assert!(!result);
 
+        // Meaningless expressions are ignored, so this is always true.
         let (result, warnings) = MarkerTree::from_str("'3.*' == python_version")
             .unwrap()
             .evaluate_collect_warnings(&env37, &[]);
         assert_eq!(warnings, &[]);
-        assert!(!result);
+        assert!(result);
     }
 
     #[test]
@@ -1546,7 +1598,9 @@ mod test {
     #[test]
     fn test_marker_expression() {
         assert_eq!(
-            MarkerExpression::from_str(r#"os_name == "nt""#).unwrap(),
+            MarkerExpression::from_str(r#"os_name == "nt""#)
+                .unwrap()
+                .unwrap(),
             MarkerExpression::String {
                 key: MarkerValueString::OsName,
                 operator: MarkerOperator::Equal,
@@ -1561,30 +1615,9 @@ mod test {
             MarkerTree::from_str(
                 r#""nt" in os_name and '3.7' >= python_version and python_full_version >= '3.7'"#
             )
-            .unwrap(),
-            MarkerTree::And(vec![
-                MarkerTree::Expression(MarkerExpression::String {
-                    value: "nt".to_string(),
-                    operator: MarkerOperator::Contains,
-                    key: MarkerValueString::OsName,
-                }),
-                MarkerTree::Expression(MarkerExpression::Version {
-                    key: MarkerValueVersion::PythonVersion,
-                    specifier: VersionSpecifier::from_pattern(
-                        pep440_rs::Operator::LessThanEqual,
-                        "3.7".parse().unwrap()
-                    )
-                    .unwrap()
-                }),
-                MarkerTree::Expression(MarkerExpression::Version {
-                    key: MarkerValueVersion::PythonFullVersion,
-                    specifier: VersionSpecifier::from_pattern(
-                        pep440_rs::Operator::GreaterThanEqual,
-                        "3.7".parse().unwrap()
-                    )
-                    .unwrap()
-                }),
-            ])
+            .unwrap()
+            .to_string(),
+            r#"python_full_version >= '3.7' and python_version <= '3.7' and 'nt' in os_name"#,
         );
     }
 
@@ -1627,53 +1660,29 @@ mod test {
         // Given `os_name == "nt" and extra == "dev"`, simplify to `os_name == "nt"`.
         let markers = MarkerTree::from_str(r#"os_name == "nt" and extra == "dev""#).unwrap();
         let simplified = markers.simplify_extras(&[ExtraName::from_str("dev").unwrap()]);
-        assert_eq!(
-            simplified,
-            Some(MarkerTree::Expression(MarkerExpression::String {
-                key: MarkerValueString::OsName,
-                operator: MarkerOperator::Equal,
-                value: "nt".to_string(),
-            }))
-        );
+        let expected = MarkerTree::from_str(r#"os_name == "nt""#).unwrap();
+        assert_eq!(simplified, expected);
 
         // Given `os_name == "nt" or extra == "dev"`, remove the marker entirely.
         let markers = MarkerTree::from_str(r#"os_name == "nt" or extra == "dev""#).unwrap();
         let simplified = markers.simplify_extras(&[ExtraName::from_str("dev").unwrap()]);
-        assert_eq!(simplified, None);
+        assert_eq!(simplified, MarkerTree::TRUE);
 
         // Given `extra == "dev"`, remove the marker entirely.
         let markers = MarkerTree::from_str(r#"extra == "dev""#).unwrap();
         let simplified = markers.simplify_extras(&[ExtraName::from_str("dev").unwrap()]);
-        assert_eq!(simplified, None);
+        assert_eq!(simplified, MarkerTree::TRUE);
 
         // Given `extra == "dev" and extra == "test"`, simplify to `extra == "test"`.
         let markers = MarkerTree::from_str(r#"extra == "dev" and extra == "test""#).unwrap();
         let simplified = markers.simplify_extras(&[ExtraName::from_str("dev").unwrap()]);
-        assert_eq!(
-            simplified,
-            Some(MarkerTree::Expression(MarkerExpression::Extra {
-                operator: ExtraOperator::Equal,
-                name: ExtraName::from_str("test").unwrap(),
-            }))
-        );
+        let expected = MarkerTree::from_str(r#"extra == "test""#).unwrap();
+        assert_eq!(simplified, expected);
 
         // Given `os_name == "nt" and extra == "test"`, don't simplify.
         let markers = MarkerTree::from_str(r#"os_name == "nt" and extra == "test""#).unwrap();
         let simplified = markers.simplify_extras(&[ExtraName::from_str("dev").unwrap()]);
-        assert_eq!(
-            simplified,
-            Some(MarkerTree::And(vec![
-                MarkerTree::Expression(MarkerExpression::String {
-                    key: MarkerValueString::OsName,
-                    operator: MarkerOperator::Equal,
-                    value: "nt".to_string(),
-                }),
-                MarkerTree::Expression(MarkerExpression::Extra {
-                    operator: ExtraOperator::Equal,
-                    name: ExtraName::from_str("test").unwrap(),
-                }),
-            ]))
-        );
+        assert_eq!(simplified, markers);
 
         // Given `os_name == "nt" and (python_version == "3.7" or extra == "dev")`, simplify to
         // `os_name == "nt".
@@ -1682,14 +1691,8 @@ mod test {
         )
         .unwrap();
         let simplified = markers.simplify_extras(&[ExtraName::from_str("dev").unwrap()]);
-        assert_eq!(
-            simplified,
-            Some(MarkerTree::Expression(MarkerExpression::String {
-                key: MarkerValueString::OsName,
-                operator: MarkerOperator::Equal,
-                value: "nt".to_string(),
-            }))
-        );
+        let expected = MarkerTree::from_str(r#"os_name == "nt""#).unwrap();
+        assert_eq!(simplified, expected);
 
         // Given `os_name == "nt" or (python_version == "3.7" and extra == "dev")`, simplify to
         // `os_name == "nt" or python_version == "3.7"`.
@@ -1698,23 +1701,8 @@ mod test {
         )
         .unwrap();
         let simplified = markers.simplify_extras(&[ExtraName::from_str("dev").unwrap()]);
-        assert_eq!(
-            simplified,
-            Some(MarkerTree::Or(vec![
-                MarkerTree::Expression(MarkerExpression::String {
-                    key: MarkerValueString::OsName,
-                    operator: MarkerOperator::Equal,
-                    value: "nt".to_string(),
-                }),
-                MarkerTree::Expression(MarkerExpression::Version {
-                    key: MarkerValueVersion::PythonVersion,
-                    specifier: VersionSpecifier::from_pattern(
-                        pep440_rs::Operator::Equal,
-                        "3.7".parse().unwrap()
-                    )
-                    .unwrap(),
-                }),
-            ]))
-        );
+        let expected =
+            MarkerTree::from_str(r#"os_name == "nt" or python_version == "3.7""#).unwrap();
+        assert_eq!(simplified, expected);
     }
 }

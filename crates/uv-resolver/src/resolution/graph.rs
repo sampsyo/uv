@@ -9,7 +9,7 @@ use distribution_types::{
     Dist, DistributionMetadata, Name, ResolutionDiagnostic, VersionId, VersionOrUrlRef,
 };
 use pep440_rs::{Version, VersionSpecifier};
-use pep508_rs::{MarkerEnvironment, MarkerTree};
+use pep508_rs::{MarkerEnvironment, MarkerTree, MarkerTreeKind};
 use pypi_types::{ParsedUrlError, Requirement, VerbatimParsedUrl, Yanked};
 use uv_configuration::{Constraints, Overrides};
 use uv_git::GitResolver;
@@ -280,12 +280,12 @@ impl ResolutionGraph {
                 // If either the existing marker or new marker is `None`, then the dependency is
                 // included unconditionally, and so the combined marker should be `None`.
                 if let (Some(marker), Some(ref version_marker)) = (marker.as_mut(), edge.marker) {
-                    marker.or(version_marker.clone());
+                    *marker = marker.or(*version_marker);
                 } else {
                     *marker = None;
                 }
             } else {
-                petgraph.update_edge(from_index, to_index, edge.marker.clone());
+                petgraph.update_edge(from_index, to_index, edge.marker);
             }
         }
 
@@ -389,17 +389,32 @@ impl ResolutionGraph {
         }
 
         /// Add all marker parameters from the given tree to the given set.
-        fn add_marker_params_from_tree(marker_tree: &MarkerTree, set: &mut IndexSet<MarkerParam>) {
-            match marker_tree {
-                MarkerTree::Expression(MarkerExpression::Version { key, .. }) => {
-                    set.insert(MarkerParam::Version(key.clone()));
+        fn add_marker_params_from_tree(marker_tree: MarkerTree, set: &mut IndexSet<MarkerParam>) {
+            match marker_tree.kind() {
+                MarkerTreeKind::True => return,
+                MarkerTreeKind::False => return,
+                MarkerTreeKind::Version(marker) => {
+                    set.insert(MarkerParam::Version(marker.key().clone()));
+                    for (_, tree) in marker.children() {
+                        add_marker_params_from_tree(tree, set);
+                    }
                 }
-                MarkerTree::Expression(MarkerExpression::String { key, .. }) => {
-                    set.insert(MarkerParam::String(key.clone()));
+                MarkerTreeKind::String(marker) => {
+                    set.insert(MarkerParam::String(marker.key().clone()));
+                    for (_, tree) in marker.children() {
+                        add_marker_params_from_tree(tree, set);
+                    }
                 }
-                MarkerTree::And(ref exprs) | MarkerTree::Or(ref exprs) => {
-                    for expr in exprs {
-                        add_marker_params_from_tree(expr, set);
+                MarkerTreeKind::In(marker) => {
+                    set.insert(MarkerParam::String(marker.key().clone()));
+                    for (_, tree) in marker.children() {
+                        add_marker_params_from_tree(tree, set);
+                    }
+                }
+                MarkerTreeKind::Contains(marker) => {
+                    set.insert(MarkerParam::String(marker.key().clone()));
+                    for (_, tree) in marker.children() {
+                        add_marker_params_from_tree(tree, set);
                     }
                 }
                 // We specifically don't care about these for the
@@ -407,9 +422,11 @@ impl ResolutionGraph {
                 // file. Quoted strings are marker values given by the
                 // user. We don't track those here, since we're only
                 // interested in which markers are used.
-                MarkerTree::Expression(
-                    MarkerExpression::Extra { .. } | MarkerExpression::Arbitrary { .. },
-                ) => {}
+                MarkerTreeKind::Extra(marker) => {
+                    for (_, tree) in marker.children() {
+                        add_marker_params_from_tree(tree, set);
+                    }
+                }
             }
         }
 
@@ -438,7 +455,7 @@ impl ResolutionGraph {
                 .constraints
                 .apply(self.overrides.apply(archive.metadata.requires_dist.iter()))
             {
-                let Some(ref marker_tree) = req.marker else {
+                let Some(marker_tree) = req.marker else {
                     continue;
                 };
                 add_marker_params_from_tree(marker_tree, &mut seen_marker_values);
@@ -450,7 +467,7 @@ impl ResolutionGraph {
             .constraints
             .apply(self.overrides.apply(self.requirements.iter()))
         {
-            let Some(ref marker_tree) = direct_req.marker else {
+            let Some(marker_tree) = direct_req.marker else {
                 continue;
             };
             add_marker_params_from_tree(marker_tree, &mut seen_marker_values);
@@ -458,7 +475,7 @@ impl ResolutionGraph {
 
         // Generate the final marker expression as a conjunction of
         // strict equality terms.
-        let mut conjuncts = vec![];
+        let mut conjunction = MarkerTree::TRUE;
         for marker_param in seen_marker_values {
             let expr = match marker_param {
                 MarkerParam::Version(value_version) => {
@@ -477,9 +494,10 @@ impl ResolutionGraph {
                     }
                 }
             };
-            conjuncts.push(MarkerTree::Expression(expr));
+            conjunction = conjunction.and(MarkerTree::expression(expr));
         }
-        Ok(MarkerTree::And(conjuncts))
+
+        Ok(conjunction)
     }
 }
 

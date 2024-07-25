@@ -79,12 +79,12 @@ impl Constraints {
             Either::Right(Either::Left(std::iter::once(requirement).chain(
                 constraints.iter().cloned().map(move |constraint| {
                     // Add the extra to the override marker.
-                    let mut joint_marker = MarkerTree::Expression(extra_expression.clone());
-                    if let Some(marker) = &constraint.marker {
-                        joint_marker.and(marker.clone());
+                    let mut joint_marker = MarkerTree::expression(extra_expression.clone());
+                    if let Some(marker) = constraint.marker {
+                        joint_marker = joint_marker.and(marker);
                     }
                     Cow::Owned(Requirement {
-                        marker: Some(joint_marker.clone()),
+                        marker: Some(joint_marker),
                         ..constraint
                     })
                 }),

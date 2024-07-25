@@ -161,7 +161,7 @@ impl PubGrubRequirement {
             package: PubGrubPackage::from_package(
                 requirement.name.clone(),
                 extra,
-                requirement.marker.clone(),
+                requirement.marker,
             ),
             version: Range::full(),
             specifier: None,
@@ -183,7 +183,7 @@ impl PubGrubRequirement {
             package: PubGrubPackage::from_package(
                 requirement.name.clone(),
                 extra,
-                requirement.marker.clone(),
+                requirement.marker,
             ),
             specifier: Some(specifier.clone()),
             url: None,

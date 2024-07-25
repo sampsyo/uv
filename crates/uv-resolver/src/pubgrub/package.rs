@@ -98,7 +98,7 @@ impl PubGrubPackage {
         // extras end up having two distinct marker expressions, which in turn
         // makes them two distinct packages. This results in PubGrub being
         // unable to unify version constraints across such packages.
-        marker = marker.and_then(|m| m.simplify_extras_with(|_| true));
+        marker = marker.map(|m| m.simplify_extras_with(|_| true));
         if let Some(extra) = extra {
             Self(Arc::new(PubGrubPackageInner::Extra {
                 name,

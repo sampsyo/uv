@@ -106,7 +106,7 @@ impl<'a, Context: BuildContext> SourceTreeResolver<'a, Context> {
                 origin: Some(origin.clone()),
                 marker: requirement
                     .marker
-                    .and_then(|marker| marker.simplify_extras(extras)),
+                    .map(|marker| marker.simplify_extras(extras)),
                 ..requirement
             })
             .collect();
@@ -129,7 +129,7 @@ impl<'a, Context: BuildContext> SourceTreeResolver<'a, Context> {
                 requirement.marker = requirement
                     .marker
                     .take()
-                    .and_then(|marker| marker.simplify_extras(&recursive.extras));
+                    .map(|marker| marker.simplify_extras(&recursive.extras));
             }
         }
 

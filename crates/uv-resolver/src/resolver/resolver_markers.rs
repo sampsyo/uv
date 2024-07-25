@@ -18,10 +18,7 @@ impl ResolverMarkers {
     pub(crate) fn and(self, other: MarkerTree) -> MarkerTree {
         match self {
             ResolverMarkers::Universal => other,
-            ResolverMarkers::Fork(mut current) => {
-                current.and(other);
-                current
-            }
+            ResolverMarkers::Fork(current) => current.and(other),
             ResolverMarkers::SpecificEnvironment(_) => {
                 unreachable!("Specific environment mode must not fork")
             }
