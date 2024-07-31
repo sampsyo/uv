@@ -46,7 +46,7 @@ use crate::dependency_provider::UvDependencyProvider;
 use crate::error::{NoSolutionError, ResolveError};
 use crate::fork_urls::ForkUrls;
 use crate::manifest::Manifest;
-use crate::marker::{normalize, requires_python_marker};
+use crate::marker::requires_python_marker;
 use crate::pins::FilePins;
 use crate::preferences::Preferences;
 use crate::pubgrub::{
@@ -331,11 +331,11 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
             if let ResolverMarkers::Fork(markers) = &state.markers {
                 if let Some(requires_python) = state.requires_python.as_ref() {
                     debug!(
-                        "Solving split {} (requires-python: {})",
+                        "Solving split {:?} (requires-python: {:?})",
                         markers, requires_python
                     );
                 } else {
-                    debug!("Solving split {}", markers);
+                    debug!("Solving split {:?}", markers);
                 }
             }
             let start = Instant::now();
@@ -511,7 +511,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                     &version,
                     &state.fork_urls,
                     &state.markers,
-                    state.requires_python.as_ref(),
+                    state.requires_python,
                 )?;
                 match forked_deps {
                     ForkedDependencies::Unavailable(reason) => {
@@ -626,8 +626,8 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
             if let Some(ref dev) = edge.to_dev {
                 write!(msg, " (group: {dev})").unwrap();
             }
-            if let Some(ref marker) = edge.marker {
-                write!(msg, " ; {marker}").unwrap();
+            if let Some(marker) = edge.marker.content() {
+                write!(msg, " ; {}", marker).unwrap();
             }
             trace!("Resolution:     {msg}");
         }
@@ -762,7 +762,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                 name,
                 extra: None,
                 dev: None,
-                marker: None,
+                marker: MarkerTree::TRUE,
             } = &**package
             else {
                 continue;
@@ -1118,7 +1118,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         version: &Version,
         fork_urls: &ForkUrls,
         markers: &ResolverMarkers,
-        requires_python: Option<&MarkerTree>,
+        requires_python: Option<MarkerTree>,
     ) -> Result<ForkedDependencies, ResolveError> {
         let result = self.get_dependencies(package, version, fork_urls, markers, requires_python);
         match markers {
@@ -1138,7 +1138,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         version: &Version,
         fork_urls: &ForkUrls,
         markers: &ResolverMarkers,
-        requires_python: Option<&MarkerTree>,
+        requires_python: Option<MarkerTree>,
     ) -> Result<Dependencies, ResolveError> {
         let url = package.name().and_then(|name| fork_urls.get(name));
         let dependencies = match &**package {
@@ -1303,14 +1303,14 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
             // Add a dependency on both the marker and base package.
             PubGrubPackageInner::Marker { name, marker } => {
                 return Ok(Dependencies::Available(
-                    [None, Some(marker)]
+                    [MarkerTree::default(), MarkerTree::from(*marker)]
                         .into_iter()
                         .map(move |marker| PubGrubDependency {
                             package: PubGrubPackage::from(PubGrubPackageInner::Package {
                                 name: name.clone(),
                                 extra: None,
                                 dev: None,
-                                marker: marker.copied(),
+                                marker,
                             }),
                             version: Range::singleton(version.clone()),
                             specifier: None,
@@ -1327,7 +1327,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                 marker,
             } => {
                 return Ok(Dependencies::Available(
-                    [None, marker.as_ref()]
+                    [MarkerTree::default(), *marker]
                         .into_iter()
                         .dedup()
                         .flat_map(move |marker| {
@@ -1338,7 +1338,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                                         name: name.clone(),
                                         extra: extra.cloned(),
                                         dev: None,
-                                        marker: marker.copied(),
+                                        marker,
                                     }),
                                     version: Range::singleton(version.clone()),
                                     specifier: None,
@@ -1353,7 +1353,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
             // without the marker.
             PubGrubPackageInner::Dev { name, dev, marker } => {
                 return Ok(Dependencies::Available(
-                    [None, marker.as_ref()]
+                    [MarkerTree::default(), *marker]
                         .into_iter()
                         .dedup()
                         .flat_map(move |marker| {
@@ -1364,7 +1364,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                                         name: name.clone(),
                                         extra: None,
                                         dev: dev.cloned(),
-                                        marker: marker.copied(),
+                                        marker,
                                     }),
                                     version: Range::singleton(version.clone()),
                                     specifier: None,
@@ -1390,7 +1390,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         dev: Option<&'a GroupName>,
         name: Option<&PackageName>,
         markers: &'a ResolverMarkers,
-        requires_python: Option<&'a MarkerTree>,
+        requires_python: Option<MarkerTree>,
     ) -> Vec<Cow<'a, Requirement>> {
         // Start with the requirements for the current extra of the package (for an extra
         // requirement) or the non-extra (regular) dependencies (if extra is None), plus
@@ -1455,7 +1455,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
         dependencies: impl IntoIterator<Item = &'data Requirement> + 'parameters,
         extra: Option<&'parameters ExtraName>,
         markers: &'parameters ResolverMarkers,
-        requires_python: Option<&'parameters MarkerTree>,
+        requires_python: Option<MarkerTree>,
     ) -> impl Iterator<Item = Cow<'data, Requirement>> + 'parameters
     where
         'data: 'parameters,
@@ -1467,7 +1467,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                 // supported by the root, skip it.
                 if !satisfies_requires_python(requires_python, requirement) {
                     trace!(
-                        "skipping {requirement} because of Requires-Python {requires_python}",
+                        "skipping {requirement} because of Requires-Python {requires_python:?}",
                         // OK because this filter only applies when there is a present
                         // Requires-Python specifier.
                         requires_python = requires_python.unwrap()
@@ -1479,7 +1479,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                 // this fork (but will be part of another fork).
                 if let ResolverMarkers::Fork(markers) = markers {
                     if !possible_to_satisfy_markers(*markers, requirement) {
-                        trace!("skipping {requirement} because of context resolver markers {markers}");
+                        trace!("skipping {requirement} because of context resolver markers {markers:?}");
                         return false;
                     }
                 }
@@ -1516,7 +1516,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                         .filter(move |constraint| {
                             if !satisfies_requires_python(requires_python, constraint) {
                                 trace!(
-                                    "skipping {constraint} because of Requires-Python {requires_python}",
+                                    "skipping {constraint} because of Requires-Python {requires_python:?}",
                                     requires_python = requires_python.unwrap()
                                 );
                                 return false;
@@ -1526,7 +1526,7 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                             // this fork (but will be part of another fork).
                             if let ResolverMarkers::Fork(markers) = markers {
                                 if !possible_to_satisfy_markers(*markers, constraint) {
-                                    trace!("skipping {constraint} because of context resolver markers {markers}");
+                                    trace!("skipping {constraint} because of context resolver markers {markers:?}");
                                     return false;
                                 }
                             }
@@ -1554,19 +1554,14 @@ impl<InstalledPackages: InstalledPackagesProvider> ResolverState<InstalledPackag
                             // If the requirement is `requests ; sys_platform == 'darwin'` and the
                             // constraint is `requests ; python_version == '3.6'`, the constraint
                             // should only apply when _both_ markers are true.
-                            if let Some(marker) = requirement.marker {
-                                let marker = if let Some(constraint_marker) = constraint.marker {
-                                    marker.and(constraint_marker)
-                                } else {
-                                    marker
-                                };
-
+                            let marker = requirement.marker.and(constraint.marker);
+                            if requirement.marker != marker {
                                 Cow::Owned(Requirement {
                                     name: constraint.name.clone(),
                                     extras: constraint.extras.clone(),
                                     source: constraint.source.clone(),
                                     origin: constraint.origin.clone(),
-                                    marker: Some(marker)
+                                    marker
                                 })
                             } else {
                                 Cow::Borrowed(constraint)
@@ -2189,8 +2184,6 @@ impl ForkState {
     /// accordingly.
     fn with_markers(mut self, markers: MarkerTree) -> Self {
         let combined_markers = self.markers.and(markers);
-        let combined_markers =
-            normalize(combined_markers, None).expect("Fork markers are universal");
 
         // If the fork contains a narrowed Python requirement, apply it.
         let python_requirement = requires_python_marker(combined_markers)
@@ -2274,14 +2267,14 @@ impl ForkState {
                             to_url: to_url.cloned(),
                             to_extra: dependency_extra.clone(),
                             to_dev: dependency_dev.clone(),
-                            marker: None,
+                            marker: MarkerTree::default(),
                         };
                         dependencies.insert(edge);
                     }
 
                     PubGrubPackageInner::Marker {
                         name: ref dependency_name,
-                        marker: ref dependency_marker,
+                        marker: dependency_marker,
                         ..
                     } => {
                         if self_name.is_some_and(|self_name| self_name == dependency_name) {
@@ -2299,7 +2292,7 @@ impl ForkState {
                             to_url: to_url.cloned(),
                             to_extra: None,
                             to_dev: None,
-                            marker: Some(*dependency_marker),
+                            marker: dependency_marker.into(),
                         };
                         dependencies.insert(edge);
                     }
@@ -2368,7 +2361,7 @@ impl ForkState {
                     name,
                     extra,
                     dev,
-                    marker: None,
+                    marker: MarkerTree::TRUE,
                 } = &*package
                 {
                     Some((
@@ -2434,7 +2427,7 @@ pub(crate) struct ResolutionDependencyEdge {
     pub(crate) to_url: Option<VerbatimParsedUrl>,
     pub(crate) to_extra: Option<ExtraName>,
     pub(crate) to_dev: Option<GroupName>,
-    pub(crate) marker: Option<MarkerTree>,
+    pub(crate) marker: MarkerTree,
 }
 
 impl Resolution {
@@ -2638,7 +2631,7 @@ impl Dependencies {
             // is look for a group in which there is some overlap. If so, this
             // package gets added to that fork group. Otherwise, we create a
             // new fork group.
-            let Some(possible_fork) = possible_forks.find_overlapping_fork_group(*marker) else {
+            let Some(possible_fork) = possible_forks.find_overlapping_fork_group(marker) else {
                 // Create a new fork since there was no overlap.
                 possible_forks.forks.push(PossibleFork {
                     packages: vec![(index, marker)],
@@ -2677,7 +2670,7 @@ impl Dependencies {
             assert!(fork_groups.forks.len() >= 2, "expected definitive fork");
             let mut new_forks: Vec<Fork> = vec![];
             if let Some(markers) = fork_groups.remaining_universe() {
-                trace!("Adding split to cover possibly incomplete markers: {markers}");
+                trace!("Adding split to cover possibly incomplete markers: {markers:?}");
                 new_forks.push(Fork {
                     dependencies: vec![],
                     markers,
@@ -2779,7 +2772,6 @@ impl Fork {
         let marker = dependency
             .package
             .marker()
-            .cloned()
             .expect("forked package always has a marker");
         self.remove_disjoint_packages(marker);
         self.dependencies.push(dependency);
@@ -2839,16 +2831,16 @@ impl Fork {
 /// Note that we use indices into a `Dependencies` list to represent packages.
 /// This avoids excessive cloning.
 #[derive(Debug)]
-enum PossibleForks<'a> {
+enum PossibleForks {
     /// A group of dependencies (all with the same package name) where it is
     /// known that no forks exist.
     NoForkPossible(Vec<usize>),
     /// A group of groups dependencies (all with the same package name) where
     /// it is possible for each group to correspond to a fork.
-    PossiblyForking(PossibleForkGroups<'a>),
+    PossiblyForking(PossibleForkGroups),
 }
 
-impl<'a> PossibleForks<'a> {
+impl PossibleForks {
     /// Returns true if and only if this contains a fork assuming there are
     /// no other dependencies to be considered.
     fn has_fork(&self) -> bool {
@@ -2864,7 +2856,7 @@ impl<'a> PossibleForks<'a> {
     /// This should be called when all dependencies for one package have been
     /// considered. It will normalize this value such that `PossiblyForking`
     /// means `DefinitelyForking`.
-    fn finish(mut self) -> PossibleForks<'a> {
+    fn finish(mut self) -> PossibleForks {
         let PossibleForks::PossiblyForking(ref fork_groups) = self else {
             return self;
         };
@@ -2916,19 +2908,16 @@ impl<'a> PossibleForks<'a> {
 /// A list of groups of dependencies (all with the same package name), where
 /// each group may correspond to a fork.
 #[derive(Debug)]
-struct PossibleForkGroups<'a> {
+struct PossibleForkGroups {
     /// The list of forks.
-    forks: Vec<PossibleFork<'a>>,
+    forks: Vec<PossibleFork>,
 }
 
-impl<'a> PossibleForkGroups<'a> {
+impl PossibleForkGroups {
     /// Given a marker expression, if there is a fork in this set of fork
     /// groups with non-empty overlap with it, then that fork group is
     /// returned. Otherwise, `None` is returned.
-    fn find_overlapping_fork_group<'g>(
-        &'g mut self,
-        marker: MarkerTree,
-    ) -> Option<&'g mut PossibleFork<'a>> {
+    fn find_overlapping_fork_group(&mut self, marker: MarkerTree) -> Option<&mut PossibleFork> {
         self.forks
             .iter_mut()
             .find(|fork| fork.is_overlapping(marker))
@@ -2969,17 +2958,17 @@ impl<'a> PossibleForkGroups<'a> {
 /// As with other intermediate data types, we use indices into a list of
 /// `Dependencies` to represent packages to avoid excessive cloning.
 #[derive(Debug)]
-struct PossibleFork<'a> {
-    packages: Vec<(usize, &'a MarkerTree)>,
+struct PossibleFork {
+    packages: Vec<(usize, MarkerTree)>,
 }
 
-impl<'a> PossibleFork<'a> {
+impl PossibleFork {
     /// Returns true if and only if the given marker expression has a non-empty
     /// intersection with *any* of the package markers within this possible
     /// fork.
     fn is_overlapping(&self, candidate_package_markers: MarkerTree) -> bool {
         for &(_, package_markers) in &self.packages {
-            if !candidate_package_markers.is_disjoint_with(*package_markers) {
+            if !candidate_package_markers.is_disjoint_with(package_markers) {
                 return true;
             }
         }
@@ -2993,7 +2982,7 @@ impl<'a> PossibleFork<'a> {
     fn union(&self) -> MarkerTree {
         self.packages
             .iter()
-            .fold(MarkerTree::FALSE, |union, &(_, &tree)| union.or(tree))
+            .fold(MarkerTree::FALSE, |union, &(_, tree)| union.or(tree))
     }
 }
 
@@ -3004,20 +2993,17 @@ impl<'a> PossibleFork<'a> {
 /// universal resolution mode. In non-universal mode, `requires_python` is
 /// `None` and this always returns `true`.
 fn satisfies_requires_python(
-    requires_python: Option<&MarkerTree>,
+    requires_python: Option<MarkerTree>,
     requirement: &Requirement,
 ) -> bool {
     let Some(requires_python) = requires_python else {
         return true;
     };
-    possible_to_satisfy_markers(*requires_python, requirement)
+    possible_to_satisfy_markers(requires_python, requirement)
 }
 
 /// Returns true if and only if the given requirement's marker expression has a
 /// possible true value given the `markers` expression given.
 fn possible_to_satisfy_markers(markers: MarkerTree, requirement: &Requirement) -> bool {
-    let Some(marker) = requirement.marker else {
-        return true;
-    };
-    !markers.is_disjoint_with(marker)
+    !markers.is_disjoint_with(requirement.marker)
 }

@@ -494,9 +494,7 @@ pub(crate) fn parse_markers<T: Pep508Url>(
 ) -> Result<MarkerTree, Pep508Error<T>> {
     let mut chars = Cursor::new(markers);
 
-    parse_markers_cursor(&mut chars, reporter).map(|tree| {
-        // If the tree consisted entirely of arbitrary expressions
-        // that were ignored, it evaluates to true.
-        tree.unwrap_or(MarkerTree::TRUE)
-    })
+    // If the tree consisted entirely of arbitrary expressions
+    // that were ignored, it evaluates to true.
+    parse_markers_cursor(&mut chars, reporter).map(Option::unwrap_or_default)
 }

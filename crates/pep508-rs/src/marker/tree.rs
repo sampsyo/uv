@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::fmt::{Display, Formatter};
+use std::fmt::{self, Display, Formatter};
 use std::ops::{Bound, Deref};
 use std::str::FromStr;
 
@@ -518,8 +518,28 @@ impl Display for MarkerExpression {
 }
 
 /// Represents one of the nested marker expressions with and/or/parentheses
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct MarkerTree(NodeId);
+
+impl fmt::Debug for MarkerTree {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if self.is_true() {
+            return write!(f, "true");
+        }
+
+        if self.is_false() {
+            return write!(f, "false");
+        }
+
+        write!(f, "{}", self.content().unwrap())
+    }
+}
+
+impl Default for MarkerTree {
+    fn default() -> Self {
+        MarkerTree::TRUE
+    }
+}
 
 impl<'de> Deserialize<'de> for MarkerTree {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -528,15 +548,6 @@ impl<'de> Deserialize<'de> for MarkerTree {
     {
         let s = String::deserialize(deserializer)?;
         FromStr::from_str(&s).map_err(de::Error::custom)
-    }
-}
-
-impl Serialize for MarkerTree {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -582,6 +593,14 @@ impl MarkerTree {
     /// in any environment.
     pub fn is_false(&self) -> bool {
         self.0.is_false()
+    }
+
+    pub fn content(self) -> Option<MarkerTreeContent> {
+        if self.is_true() {
+            return None;
+        }
+
+        Some(MarkerTreeContent(self))
     }
 
     /// Returns `true` if there is no environment in which both marker trees can both
@@ -1248,13 +1267,34 @@ impl ExtraMarkerTree<'_> {
     }
 }
 
-impl Display for MarkerTree {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if self.is_true() || self.is_false() {
-            return Ok(());
+/// A marker tree that is not a constant `true`.
+///
+/// This is primarily useful because it implements the `Display` trait.
+#[derive(Copy, Clone, Eq, Hash, PartialEq, PartialOrd, Ord, Debug)]
+pub struct MarkerTreeContent(MarkerTree);
+
+impl From<MarkerTreeContent> for MarkerTree {
+    fn from(value: MarkerTreeContent) -> Self {
+        value.0
+    }
+}
+
+impl Serialize for MarkerTreeContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl Display for MarkerTreeContent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if self.0.is_false() {
+            return write!(f, "python_version < 0");
         }
 
-        let dnf = self.to_dnf();
+        let dnf = self.0.to_dnf();
         let format_conjunction = |conjunction: &Vec<MarkerExpression>| {
             conjunction
                 .iter()
@@ -1354,7 +1394,7 @@ mod test {
     fn test_marker_negation() {
         let neg = |marker_string: &str| -> String {
             let tree: MarkerTree = marker_string.parse().unwrap();
-            tree.negate().to_string()
+            tree.negate().content().unwrap().to_string()
         };
 
         assert_eq!(neg("python_version > '3.6'"), "python_version <= '3.6'");
@@ -1615,6 +1655,8 @@ mod test {
             MarkerTree::from_str(
                 r#""nt" in os_name and '3.7' >= python_version and python_full_version >= '3.7'"#
             )
+            .unwrap()
+            .content()
             .unwrap()
             .to_string(),
             r#"python_full_version >= '3.7' and python_version <= '3.7' and 'nt' in os_name"#,

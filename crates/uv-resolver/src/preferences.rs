@@ -22,7 +22,7 @@ pub enum PreferenceError {
 pub struct Preference {
     name: PackageName,
     version: Version,
-    marker: Option<MarkerTree>,
+    marker: MarkerTree,
     hashes: Vec<HashDigest>,
 }
 
@@ -71,7 +71,7 @@ impl Preference {
         Self {
             name: dist.name().clone(),
             version: version.clone(),
-            marker: None,
+            marker: MarkerTree::default(),
             hashes: Vec::new(),
         }
     }
@@ -81,7 +81,7 @@ impl Preference {
         Self {
             name: dist.id.name.clone(),
             version: dist.id.version.clone(),
-            marker: None,
+            marker: MarkerTree::default(),
             hashes: Vec::new(),
         }
     }
@@ -117,9 +117,10 @@ impl Preferences {
         let preferences = preferences
             .into_iter()
             .filter_map(|preference| {
-                if preference.marker.as_ref().map_or(true, |marker| {
-                    marker.evaluate_optional_environment(markers, &[])
-                }) {
+                if preference
+                    .marker
+                    .evaluate_optional_environment(markers, &[])
+                {
                     Some((
                         preference.name,
                         Pin {

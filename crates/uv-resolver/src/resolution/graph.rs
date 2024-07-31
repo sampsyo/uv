@@ -31,7 +31,7 @@ use crate::{
 #[derive(Debug)]
 pub struct ResolutionGraph {
     /// The underlying graph.
-    pub(crate) petgraph: Graph<ResolutionGraphNode, Option<MarkerTree>, Directed>,
+    pub(crate) petgraph: Graph<ResolutionGraphNode, MarkerTree, Directed>,
     /// The range of supported Python versions.
     pub(crate) requires_python: Option<RequiresPython>,
     /// Any diagnostics that were encountered while building the graph.
@@ -73,7 +73,7 @@ impl ResolutionGraph {
             Option<&'a GroupName>,
         );
 
-        let mut petgraph: Graph<ResolutionGraphNode, Option<MarkerTree>, Directed> =
+        let mut petgraph: Graph<ResolutionGraphNode, MarkerTree, Directed> =
             Graph::with_capacity(resolution.nodes.len(), resolution.nodes.len());
         let mut inverse: FxHashMap<NodeKey, NodeIndex<u32>> =
             FxHashMap::with_capacity_and_hasher(resolution.nodes.len(), FxBuildHasher);
@@ -277,13 +277,7 @@ impl ResolutionGraph {
                 .find_edge(from_index, to_index)
                 .and_then(|edge| petgraph.edge_weight_mut(edge))
             {
-                // If either the existing marker or new marker is `None`, then the dependency is
-                // included unconditionally, and so the combined marker should be `None`.
-                if let (Some(marker), Some(ref version_marker)) = (marker.as_mut(), edge.marker) {
-                    *marker = marker.or(*version_marker);
-                } else {
-                    *marker = None;
-                }
+                *marker = marker.or(edge.marker);
             } else {
                 petgraph.update_edge(from_index, to_index, edge.marker);
             }
@@ -299,12 +293,10 @@ impl ResolutionGraph {
 
         // Normalize any markers.
         for edge in petgraph.edge_indices() {
-            if let Some(marker) = petgraph[edge].take() {
-                petgraph[edge] = crate::marker::normalize(
-                    marker,
-                    requires_python.as_ref().map(RequiresPython::bound),
-                );
-            }
+            petgraph[edge] = crate::marker::normalize(
+                petgraph[edge],
+                requires_python.as_ref().map(RequiresPython::bound),
+            );
         }
 
         Ok(Self {
@@ -455,10 +447,7 @@ impl ResolutionGraph {
                 .constraints
                 .apply(self.overrides.apply(archive.metadata.requires_dist.iter()))
             {
-                let Some(marker_tree) = req.marker else {
-                    continue;
-                };
-                add_marker_params_from_tree(marker_tree, &mut seen_marker_values);
+                add_marker_params_from_tree(req.marker, &mut seen_marker_values);
             }
         }
 
@@ -467,10 +456,7 @@ impl ResolutionGraph {
             .constraints
             .apply(self.overrides.apply(self.requirements.iter()))
         {
-            let Some(marker_tree) = direct_req.marker else {
-                continue;
-            };
-            add_marker_params_from_tree(marker_tree, &mut seen_marker_values);
+            add_marker_params_from_tree(direct_req.marker, &mut seen_marker_values);
         }
 
         // Generate the final marker expression as a conjunction of

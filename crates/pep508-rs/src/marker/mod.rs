@@ -17,6 +17,6 @@ mod tree;
 
 pub use environment::{MarkerEnvironment, MarkerEnvironmentBuilder};
 pub use tree::{
-    ExtraOperator, MarkerExpression, MarkerOperator, MarkerTree, MarkerTreeKind, MarkerValue,
-    MarkerValueString, MarkerValueVersion, MarkerWarningKind, StringVersion,
+    ExtraOperator, MarkerExpression, MarkerOperator, MarkerTree, MarkerTreeContent, MarkerTreeKind,
+    MarkerValue, MarkerValueString, MarkerValueVersion, MarkerWarningKind, StringVersion,
 };

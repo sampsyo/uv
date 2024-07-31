@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use pep508_rs::MarkerTree;
 use pypi_types::{HashDigest, Requirement, RequirementSource};
 use uv_normalize::{ExtraName, GroupName, PackageName};
 
@@ -194,7 +195,7 @@ impl From<&ResolvedDist> for Requirement {
         Requirement {
             name: resolved_dist.name().clone(),
             extras: vec![],
-            marker: None,
+            marker: MarkerTree::default(),
             source,
             origin: None,
         }

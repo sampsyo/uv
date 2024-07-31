@@ -394,12 +394,14 @@ pub(crate) async fn pip_compile(
     if include_marker_expression {
         if let ResolverMarkers::SpecificEnvironment(markers) = &markers {
             let relevant_markers = resolution.marker_tree(&top_level_index, markers)?;
-            writeln!(
-                writer,
-                "{}",
-                "# Pinned dependencies known to be valid for:".green()
-            )?;
-            writeln!(writer, "{}", format!("#    {relevant_markers}").green())?;
+            if let Some(relevant_markers) = relevant_markers.content() {
+                writeln!(
+                    writer,
+                    "{}",
+                    "# Pinned dependencies known to be valid for:".green()
+                )?;
+                writeln!(writer, "{}", format!("#    {relevant_markers}").green())?;
+            }
         }
     }
 

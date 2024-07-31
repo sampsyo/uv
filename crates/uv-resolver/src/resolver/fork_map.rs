@@ -15,7 +15,7 @@ pub(crate) struct ForkMap<T>(FxHashMap<PackageName, Vec<Entry<T>>>);
 #[derive(Debug, Clone)]
 struct Entry<T> {
     value: T,
-    marker: Option<MarkerTree>,
+    marker: MarkerTree,
 }
 
 impl<T> Default for ForkMap<T> {
@@ -67,11 +67,7 @@ impl<T> ForkMap<T> {
             // with the current fork, i.e. the markers are not disjoint.
             ResolverMarkers::Fork(fork) => values
                 .iter()
-                .filter(|entry| {
-                    !entry
-                        .marker
-                        .is_some_and(|marker| fork.is_disjoint_with(marker))
-                })
+                .filter(|entry| fork.is_disjoint_with(entry.marker))
                 .map(|entry| &entry.value)
                 .collect(),
 

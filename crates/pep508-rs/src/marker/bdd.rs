@@ -585,7 +585,7 @@ pub(crate) enum Variable {
         value: String,
     },
     // Keep extra at the leaves, so when simplifying extra expression we just remove the
-    // leaves instead of having to mutate then entire tree.
+    // leaves instead of having to reconstruct the entire tree.
     Extra(ExtraName),
 }
 

@@ -381,8 +381,8 @@ fn update_requirement(old: &mut Requirement, new: Requirement, has_source: bool)
     }
 
     // Update the marker expression.
-    if let Some(marker) = new.marker {
-        old.marker = Some(marker);
+    if new.marker.content().is_some() {
+        old.marker = new.marker;
     }
 }
 

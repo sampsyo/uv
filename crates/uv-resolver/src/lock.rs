@@ -93,7 +93,7 @@ impl Lock {
                     else {
                         continue;
                     };
-                    let marker = edge.weight().as_ref();
+                    let marker = *edge.weight();
                     locked_dist.add_dependency(dependency_dist, marker);
                 }
                 let id = locked_dist.id.clone();
@@ -125,7 +125,7 @@ impl Lock {
                     else {
                         continue;
                     };
-                    let marker = edge.weight().as_ref();
+                    let marker = *edge.weight();
                     locked_dist.add_optional_dependency(extra.clone(), dependency_dist, marker);
                 }
             }
@@ -143,7 +143,7 @@ impl Lock {
                     else {
                         continue;
                     };
-                    let marker = edge.weight().as_ref();
+                    let marker = *edge.weight();
                     locked_dist.add_dev_dependency(group.clone(), dependency_dist, marker);
                 }
             }
@@ -415,11 +415,7 @@ impl Lock {
                     ))
                 };
             for dep in deps {
-                if dep
-                    .marker
-                    .as_ref()
-                    .map_or(true, |marker| marker.evaluate(marker_env, &[]))
-                {
+                if dep.marker.evaluate(marker_env, &[]) {
                     let dep_dist = self.find_by_id(&dep.distribution_id);
                     if seen.insert((&dep.distribution_id, None)) {
                         queue.push_back((dep_dist, None));
@@ -662,7 +658,7 @@ impl Distribution {
     }
 
     /// Add the [`AnnotatedDist`] as a dependency of the [`Distribution`].
-    fn add_dependency(&mut self, annotated_dist: &AnnotatedDist, marker: Option<&MarkerTree>) {
+    fn add_dependency(&mut self, annotated_dist: &AnnotatedDist, marker: MarkerTree) {
         let new_dep = Dependency::from_annotated_dist(annotated_dist, marker);
         for existing_dep in &mut self.dependencies {
             if existing_dep.distribution_id == new_dep.distribution_id
@@ -680,7 +676,7 @@ impl Distribution {
         &mut self,
         extra: ExtraName,
         annotated_dist: &AnnotatedDist,
-        marker: Option<&MarkerTree>,
+        marker: MarkerTree,
     ) {
         self.optional_dependencies
             .entry(extra)
@@ -693,7 +689,7 @@ impl Distribution {
         &mut self,
         dev: GroupName,
         annotated_dist: &AnnotatedDist,
-        marker: Option<&MarkerTree>,
+        marker: MarkerTree,
     ) {
         self.dev_dependencies
             .entry(dev)
@@ -949,11 +945,7 @@ impl Distribution {
                         name: extra.clone(),
                     });
 
-                    match dep.marker {
-                        Some(ref mut tree) => *tree = tree.and(marker),
-                        None => dep.marker = Some(marker),
-                    }
-
+                    dep.marker = dep.marker.and(marker);
                     requires_dist.push(dep);
                 }
             }
@@ -2098,17 +2090,13 @@ impl TryFrom<WheelWire> for Wheel {
 struct Dependency {
     distribution_id: DistributionId,
     extra: BTreeSet<ExtraName>,
-    marker: Option<MarkerTree>,
+    marker: MarkerTree,
 }
 
 impl Dependency {
-    fn from_annotated_dist(
-        annotated_dist: &AnnotatedDist,
-        marker: Option<&MarkerTree>,
-    ) -> Dependency {
+    fn from_annotated_dist(annotated_dist: &AnnotatedDist, marker: MarkerTree) -> Dependency {
         let distribution_id = DistributionId::from_annotated_dist(annotated_dist);
         let extra = annotated_dist.extra.iter().cloned().collect();
-        let marker = marker.copied();
         Dependency {
             distribution_id,
             extra,
@@ -2202,7 +2190,7 @@ impl Dependency {
                 .collect::<Array>();
             table.insert("extra", value(extra_array));
         }
-        if let Some(ref marker) = self.marker {
+        if let Some(marker) = self.marker.content() {
             table.insert("marker", value(marker.to_string()));
         }
 
@@ -2240,7 +2228,8 @@ struct DependencyWire {
     distribution_id: DistributionIdForDependency,
     #[serde(default)]
     extra: BTreeSet<ExtraName>,
-    marker: Option<MarkerTree>,
+    #[serde(default = "MarkerTree::default")]
+    marker: MarkerTree,
 }
 
 impl DependencyWire {

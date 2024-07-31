@@ -20,7 +20,7 @@ use crate::{
 pub struct Requirement {
     pub name: PackageName,
     pub extras: Vec<ExtraName>,
-    pub marker: Option<MarkerTree>,
+    pub marker: MarkerTree,
     pub source: RequirementSource,
     pub origin: Option<RequirementOrigin>,
 }
@@ -32,11 +32,7 @@ impl Requirement {
     /// expressions based on the environment to `true`. That is, this provides
     /// environment independent marker evaluation.
     pub fn evaluate_markers(&self, env: Option<&MarkerEnvironment>, extras: &[ExtraName]) -> bool {
-        if let Some(marker) = &self.marker {
-            marker.evaluate_optional_environment(env, extras)
-        } else {
-            true
-        }
+        self.marker.evaluate_optional_environment(env, extras)
     }
 
     /// Returns `true` if the requirement is editable.
@@ -215,8 +211,8 @@ impl Display for Requirement {
                 write!(f, " @ {url}")?;
             }
         }
-        if let Some(marker) = &self.marker {
-            write!(f, " ; {marker}")?;
+        if let Some(marker) = self.marker.content() {
+            write!(f, " ; {}", marker)?;
         }
         Ok(())
     }

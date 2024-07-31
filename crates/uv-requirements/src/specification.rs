@@ -30,6 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use pep508_rs::MarkerTree;
 use rustc_hash::FxHashSet;
 use tracing::instrument;
 
@@ -196,7 +197,7 @@ impl RequirementsSpecification {
                         requirement: UnresolvedRequirement::Unnamed(UnnamedRequirement {
                             url: VerbatimParsedUrl::parse_absolute_path(path)?,
                             extras: vec![],
-                            marker: None,
+                            marker: MarkerTree::default(),
                             origin: None,
                         }),
                         hashes: vec![],

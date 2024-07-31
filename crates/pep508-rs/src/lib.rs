@@ -39,9 +39,9 @@ use url::Url;
 
 use cursor::Cursor;
 pub use marker::{
-    ExtraOperator, MarkerEnvironment, MarkerEnvironmentBuilder, MarkerExpression,
-    MarkerOperator, MarkerTree, MarkerTreeKind, MarkerValue, MarkerValueString, MarkerValueVersion,
-    MarkerWarningKind, StringVersion,
+    ExtraOperator, MarkerEnvironment, MarkerEnvironmentBuilder, MarkerExpression, MarkerOperator,
+    MarkerTree, MarkerTreeContent, MarkerTreeKind, MarkerValue, MarkerValueString,
+    MarkerValueVersion, MarkerWarningKind, StringVersion,
 };
 pub use origin::RequirementOrigin;
 #[cfg(feature = "pyo3")]
@@ -148,7 +148,7 @@ pub struct Requirement<T: Pep508Url = VerbatimUrl> {
     /// The markers such as `python_version > "3.8"` in
     /// `requests [security,tests] >= 2.8.1, == 2.8.* ; python_version > "3.8"`.
     /// Those are a nested and/or tree.
-    pub marker: Option<MarkerTree>,
+    pub marker: MarkerTree,
     /// The source file containing the requirement.
     pub origin: Option<RequirementOrigin>,
 }
@@ -189,8 +189,8 @@ impl<T: Pep508Url + Display> Display for Requirement<T> {
                 }
             }
         }
-        if let Some(marker) = &self.marker {
-            write!(f, " ; {marker}")?;
+        if let Some(marker) = self.marker.content() {
+            write!(f, " ; {}", marker)?;
         }
         Ok(())
     }
@@ -255,7 +255,7 @@ impl PyRequirement {
     /// `requests [security,tests] >= 2.8.1, == 2.8.* ; python_version > "3.8"`
     #[getter]
     pub fn marker(&self) -> Option<String> {
-        self.marker.as_ref().map(ToString::to_string)
+        self.marker.content().as_ref().map(ToString::to_string)
     }
 
     /// Parses a PEP 440 string
@@ -371,11 +371,7 @@ impl PyRequirement {
 impl<T: Pep508Url> Requirement<T> {
     /// Returns whether the markers apply for the given environment
     pub fn evaluate_markers(&self, env: &MarkerEnvironment, extras: &[ExtraName]) -> bool {
-        if let Some(marker) = &self.marker {
-            marker.evaluate(env, extras)
-        } else {
-            true
-        }
+        self.marker.evaluate(env, extras)
     }
 
     /// Returns whether the requirement would be satisfied, independent of environment markers, i.e.
@@ -389,11 +385,8 @@ impl<T: Pep508Url> Requirement<T> {
         extras: &HashSet<ExtraName>,
         python_versions: &[Version],
     ) -> bool {
-        if let Some(marker) = &self.marker {
-            marker.evaluate_extras_and_python_version(extras, python_versions)
-        } else {
-            true
-        }
+        self.marker
+            .evaluate_extras_and_python_version(extras, python_versions)
     }
 
     /// Returns whether the markers apply for the given environment.
@@ -402,11 +395,7 @@ impl<T: Pep508Url> Requirement<T> {
         env: &MarkerEnvironment,
         extras: &[ExtraName],
     ) -> (bool, Vec<MarkerWarning>) {
-        if let Some(marker) = &self.marker {
-            marker.evaluate_collect_warnings(env, extras)
-        } else {
-            (true, Vec::new())
-        }
+        self.marker.evaluate_collect_warnings(env, extras)
     }
 
     /// Return the requirement with an additional marker added, to require the given extra.
@@ -420,13 +409,8 @@ impl<T: Pep508Url> Requirement<T> {
             name: extra.clone(),
         });
 
-        let marker = match self.marker {
-            Some(expression) => expression.and(extra),
-            None => extra,
-        };
-
         Self {
-            marker: Some(marker),
+            marker: self.marker.and(extra),
             ..self
         }
     }
@@ -1076,7 +1060,7 @@ fn parse_pep508_requirement<T: Pep508Url>(
         name,
         extras,
         version_or_url: requirement_kind,
-        marker,
+        marker: marker.unwrap_or_default(),
         origin: None,
     })
 }

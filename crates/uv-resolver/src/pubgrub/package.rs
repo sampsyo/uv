@@ -1,7 +1,7 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use pep508_rs::MarkerTree;
+use pep508_rs::{MarkerTree, MarkerTreeContent};
 use uv_normalize::{ExtraName, GroupName, PackageName};
 
 /// [`Arc`] wrapper around [`PubGrubPackageInner`] to make cloning (inside PubGrub) cheap.
@@ -46,7 +46,7 @@ pub enum PubGrubPackageInner {
         name: PackageName,
         extra: Option<ExtraName>,
         dev: Option<GroupName>,
-        marker: Option<MarkerTree>,
+        marker: MarkerTree,
     },
     /// A proxy package to represent a dependency with an extra (e.g., `black[colorama]`).
     ///
@@ -64,7 +64,7 @@ pub enum PubGrubPackageInner {
     Extra {
         name: PackageName,
         extra: ExtraName,
-        marker: Option<MarkerTree>,
+        marker: MarkerTree,
     },
     /// A proxy package to represent an enabled "dependency group" (e.g., development dependencies).
     ///
@@ -74,7 +74,7 @@ pub enum PubGrubPackageInner {
     Dev {
         name: PackageName,
         dev: GroupName,
-        marker: Option<MarkerTree>,
+        marker: MarkerTree,
     },
     /// A proxy package for a base package with a marker (e.g., `black; python_version >= "3.6"`).
     ///
@@ -82,7 +82,7 @@ pub enum PubGrubPackageInner {
     /// rather than the `Marker` variant.
     Marker {
         name: PackageName,
-        marker: MarkerTree,
+        marker: MarkerTreeContent,
     },
 }
 
@@ -91,21 +91,21 @@ impl PubGrubPackage {
     pub(crate) fn from_package(
         name: PackageName,
         extra: Option<ExtraName>,
-        mut marker: Option<MarkerTree>,
+        mut marker: MarkerTree,
     ) -> Self {
         // Remove all extra expressions from the marker, since we track extras
         // separately. This also avoids an issue where packages added via
         // extras end up having two distinct marker expressions, which in turn
         // makes them two distinct packages. This results in PubGrub being
         // unable to unify version constraints across such packages.
-        marker = marker.map(|m| m.simplify_extras_with(|_| true));
+        marker = marker.simplify_extras_with(|_| true);
         if let Some(extra) = extra {
             Self(Arc::new(PubGrubPackageInner::Extra {
                 name,
                 extra,
                 marker,
             }))
-        } else if let Some(marker) = marker {
+        } else if let Some(marker) = marker.content() {
             Self(Arc::new(PubGrubPackageInner::Marker { name, marker }))
         } else {
             Self(Arc::new(PubGrubPackageInner::Package {
@@ -145,15 +145,15 @@ impl PubGrubPackage {
 
     /// Returns the marker expression associated with this PubGrub package, if
     /// it has one.
-    pub(crate) fn marker(&self) -> Option<&MarkerTree> {
-        match &**self {
+    pub(crate) fn marker(&self) -> Option<MarkerTree> {
+        match **self {
             // A root can never be a dependency of another package, and a `Python` pubgrub
             // package is never returned by `get_dependencies`. So these cases never occur.
             PubGrubPackageInner::Root(_) | PubGrubPackageInner::Python(_) => None,
             PubGrubPackageInner::Package { marker, .. }
             | PubGrubPackageInner::Extra { marker, .. }
-            | PubGrubPackageInner::Dev { marker, .. } => marker.as_ref(),
-            PubGrubPackageInner::Marker { marker, .. } => Some(marker),
+            | PubGrubPackageInner::Dev { marker, .. } => Some(marker),
+            PubGrubPackageInner::Marker { marker, .. } => Some(marker.into()),
         }
     }
 }
@@ -180,13 +180,13 @@ impl std::fmt::Display for PubGrubPackageInner {
             Self::Package {
                 name,
                 extra: None,
-                marker: None,
+                marker: MarkerTree::TRUE,
                 ..
             } => write!(f, "{name}"),
             Self::Package {
                 name,
                 extra: Some(extra),
-                marker: None,
+                marker: MarkerTree::TRUE,
                 ..
             } => {
                 write!(f, "{name}[{extra}]")
@@ -194,16 +194,16 @@ impl std::fmt::Display for PubGrubPackageInner {
             Self::Package {
                 name,
                 extra: None,
-                marker: Some(marker),
+                marker,
                 ..
-            } => write!(f, "{name}{{{marker}}}"),
+            } => write!(f, "{name}{{{}}}", marker.content().unwrap()),
             Self::Package {
                 name,
                 extra: Some(extra),
-                marker: Some(marker),
+                marker,
                 ..
             } => {
-                write!(f, "{name}[{extra}]{{{marker}}}")
+                write!(f, "{name}[{extra}]{{{}}}", marker.content().unwrap())
             }
             Self::Marker { name, marker, .. } => write!(f, "{name}{{{marker}}}"),
             Self::Extra { name, extra, .. } => write!(f, "{name}[{extra}]"),

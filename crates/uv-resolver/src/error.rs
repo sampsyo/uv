@@ -52,7 +52,7 @@ pub enum ResolveError {
     #[error("Requirements contain conflicting URLs for package `{0}`:\n- {}", _1.join("\n- "))]
     ConflictingUrlsUniversal(PackageName, Vec<String>),
 
-    #[error("Requirements contain conflicting URLs for package `{package_name}` in split `{fork_markers}`:\n- {}", urls.join("\n- "))]
+    #[error("Requirements contain conflicting URLs for package `{package_name}` in split `{fork_markers:?}`:\n- {}", urls.join("\n- "))]
     ConflictingUrlsFork {
         package_name: PackageName,
         urls: Vec<String>,
@@ -135,7 +135,7 @@ impl NoSolutionError {
                 "No solution found when resolving dependencies:".to_string()
             }
             ResolverMarkers::Fork(markers) => {
-                format!("No solution found when resolving dependencies for split ({markers}):")
+                format!("No solution found when resolving dependencies for split ({markers:?}):")
             }
         }
     }

@@ -64,11 +64,8 @@ pub(crate) fn requires_python_marker(tree: MarkerTree) -> Option<RequiresPythonB
 ///
 /// This is useful in cases where creating conjunctions or disjunctions might occur in a non-deterministic
 /// order. This routine will attempt to erase the distinction created by such a construction.
-pub(crate) fn normalize(
-    tree: MarkerTree,
-    bound: Option<&RequiresPythonBound>,
-) -> Option<MarkerTree> {
-    Some(tree)
+pub(crate) fn normalize(tree: MarkerTree, bound: Option<&RequiresPythonBound>) -> MarkerTree {
+    tree
 }
 
 // #[cfg(test)]

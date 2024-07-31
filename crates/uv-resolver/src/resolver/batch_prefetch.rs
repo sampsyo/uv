@@ -1,6 +1,7 @@
 use std::cmp::min;
 
 use itertools::Itertools;
+use pep508_rs::MarkerTree;
 use pubgrub::range::Range;
 use rustc_hash::FxHashMap;
 use tokio::sync::mpsc::Sender;
@@ -59,7 +60,7 @@ impl BatchPrefetcher {
             name,
             extra: None,
             dev: None,
-            marker: None,
+            marker: MarkerTree::TRUE,
         } = &**next
         else {
             return Ok(());
@@ -206,7 +207,7 @@ impl BatchPrefetcher {
             PubGrubPackageInner::Package {
                 extra: None,
                 dev: None,
-                marker: None,
+                marker: MarkerTree::TRUE,
                 ..
             }
         ) {
