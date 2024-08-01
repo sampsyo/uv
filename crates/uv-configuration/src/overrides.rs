@@ -59,16 +59,18 @@ impl Overrides {
             //
             // When the original requirement is an optional dependency, the override(s) need to
             // be optional for the same extra, otherwise we activate extras that should be inactive.
-            Either::Right(Either::Left(overrides.iter().map(|override_requirement| {
-                // Add the extra to the override marker.
-                let marker = override_requirement
-                    .marker
-                    .and(MarkerTree::expression(extra_expression.clone()));
-                Cow::Owned(Requirement {
-                    marker,
-                    ..override_requirement.clone()
-                })
-            })))
+            Either::Right(Either::Left(overrides.iter().map(
+                move |override_requirement| {
+                    // Add the extra to the override marker.
+                    let marker = override_requirement
+                        .marker
+                        .and(MarkerTree::expression(extra_expression.clone()));
+                    Cow::Owned(Requirement {
+                        marker,
+                        ..override_requirement.clone()
+                    })
+                },
+            )))
         })
     }
 }

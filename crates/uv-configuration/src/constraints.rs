@@ -60,7 +60,7 @@ impl Constraints {
 
             // ASSUMPTION: There is one `extra = "..."`, and it's either the only marker or part
             // of the main conjunction.
-            let Some(extra_expression) = requirement.marker.top_level_extra().cloned() else {
+            let Some(extra_expression) = requirement.marker.top_level_extra() else {
                 // Case 2: A non-optional dependency with constraint(s).
                 return Either::Right(Either::Right(
                     std::iter::once(requirement).chain(constraints.iter().map(Cow::Borrowed)),

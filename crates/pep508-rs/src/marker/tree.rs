@@ -1087,25 +1087,43 @@ impl MarkerTree {
     ///
     /// ASSUMPTION: There is one `extra = "..."`, and it's either the only marker or part of the
     /// main conjunction.
-    pub fn top_level_extra(&self) -> Option<&MarkerExpression> {
-        todo!()
+    pub fn top_level_extra(&self) -> Option<MarkerExpression> {
+        let mut extra_expression = None;
+        for conjunction in self.to_dnf() {
+            let found = conjunction.iter().find_map(|expression| {
+                if matches!(
+                    expression,
+                    MarkerExpression::Extra {
+                        operator: ExtraOperator::Equal,
+                        ..
+                    }
+                ) {
+                    Some(expression)
+                } else {
+                    None
+                }
+            });
 
-        // match &self {
-        //     MarkerTree::Expression(extra_expression @ MarkerExpression::Extra { .. }) => {
-        //         Some(extra_expression)
-        //     }
-        //     MarkerTree::And(and) => and.iter().find_map(|marker| {
-        //         if let MarkerTree::Expression(
-        //             extra_expression @ MarkerExpression::Extra { .. },
-        //         ) = marker
-        //         {
-        //             Some(extra_expression)
-        //         } else {
-        //             None
-        //         }
-        //     }),
-        //     MarkerTree::Expression(_) | MarkerTree::Or(_) => None,
-        // }
+            let Some(found) = found else {
+                return None;
+            };
+
+            match extra_expression {
+                Some(ref extra_expression) => {
+                    if *extra_expression != *found {
+                        return None;
+                    }
+
+                    continue;
+                }
+                None => {
+                    extra_expression = Some(found.clone());
+                    continue;
+                }
+            }
+        }
+
+        extra_expression
     }
 
     /// Remove the extras from a marker, returning `None` if the marker tree evaluates to `true`.
