@@ -377,7 +377,7 @@ fn propagate_markers(mut graph: IntermediatePetGraph) -> IntermediatePetGraph {
     let mut topo = Topo::new(&graph);
     while let Some(index) = topo.next(&graph) {
         let marker_tree: Option<MarkerTree> = {
-            // Fold over the edges to combine the marker trees. If any edge is `None`, then
+            // Fold over the edges to combine the marker trees. If any edge is `true`, then
             // the combined marker tree is `true`.
             let mut edges = graph.edges_directed(index, Direction::Incoming);
             edges
@@ -458,13 +458,17 @@ fn combine_extras(graph: &IntermediatePetGraph) -> RequirementsTxtGraph {
         let source = inverse[&source_node.version_id()];
         let target = inverse[&target_node.version_id()];
 
-        // If either the existing marker or new marker is `None`, then the dependency is
-        // included unconditionally, and so the combined marker should be `None`.
+        // If either the existing marker or new marker is `true`, then the dependency is
+        // included unconditionally, and so the combined marker should be `true`.
         if let Some(edge) = next
             .find_edge(source, target)
             .and_then(|edge| next.edge_weight_mut(edge))
         {
-            *edge = edge.and(weight);
+            if edge.is_true() || weight.is_true() {
+                *edge = MarkerTree::TRUE;
+            } else {
+                *edge = edge.and(weight);
+            }
         } else {
             next.update_edge(source, target, weight);
         }

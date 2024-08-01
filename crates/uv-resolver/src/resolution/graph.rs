@@ -292,11 +292,11 @@ impl ResolutionGraph {
             .cloned();
 
         // Normalize any markers.
-        for edge in petgraph.edge_indices() {
-            petgraph[edge] = crate::marker::normalize(
-                petgraph[edge],
-                requires_python.as_ref().map(RequiresPython::bound),
-            );
+        if let Some(ref bound) = requires_python {
+            for edge in petgraph.edge_indices() {
+                petgraph[edge] =
+                    petgraph[edge].simplify_python_version(bound.bound().clone().into())
+            }
         }
 
         Ok(Self {

@@ -4,6 +4,7 @@ use std::ops::{Bound, Deref};
 use std::str::FromStr;
 
 use indexmap::IndexMap;
+use itertools::Itertools;
 use pubgrub::range::Range;
 #[cfg(feature = "pyo3")]
 use pyo3::{basic::CompareOp, pyclass, pymethods};
@@ -640,7 +641,8 @@ impl MarkerTree {
 
     /// Does this marker apply in the given environment?
     pub fn evaluate(&self, env: &MarkerEnvironment, extras: &[ExtraName]) -> bool {
-        self.evaluate_optional_environment(Some(env), extras)
+        self.report_deprecated_options(&mut TracingReporter);
+        self.evaluate_reporter_impl(env, extras, &mut TracingReporter)
     }
 
     /// Evaluates this marker tree against an optional environment and a
@@ -656,7 +658,10 @@ impl MarkerTree {
         extras: &[ExtraName],
     ) -> bool {
         self.report_deprecated_options(&mut TracingReporter);
-        self.evaluate_reporter_impl(env, extras, &mut TracingReporter)
+        match env {
+            None => self.evaluate_extras(extras),
+            Some(env) => self.evaluate_reporter_impl(env, extras, &mut TracingReporter),
+        }
     }
 
     /// Same as [`Self::evaluate`], but instead of using logging to warn, you can pass your own
@@ -668,12 +673,12 @@ impl MarkerTree {
         reporter: &mut impl Reporter,
     ) -> bool {
         self.report_deprecated_options(reporter);
-        self.evaluate_reporter_impl(Some(env), extras, reporter)
+        self.evaluate_reporter_impl(env, extras, reporter)
     }
 
     fn evaluate_reporter_impl(
         &self,
-        env: Option<&MarkerEnvironment>,
+        env: &MarkerEnvironment,
         extras: &[ExtraName],
         reporter: &mut impl Reporter,
     ) -> bool {
@@ -682,74 +687,54 @@ impl MarkerTree {
             MarkerTreeKind::False => return false,
             MarkerTreeKind::Version(marker) => {
                 for (range, tree) in marker.children() {
-                    if env
-                        .map(|env| range.contains(env.get_version(marker.key())))
-                        .unwrap_or(true)
-                    {
-                        return tree.evaluate_optional_environment(env, extras);
+                    if range.contains(env.get_version(marker.key())) {
+                        return tree.evaluate_reporter_impl(env, extras, reporter);
                     }
                 }
             }
             MarkerTreeKind::String(marker) => {
                 for (range, tree) in marker.children() {
-                    let value = match env {
-                        None => true,
-                        Some(env) => {
-                            let l_string = env.get_string(marker.key());
+                    let l_string = env.get_string(marker.key());
 
-                            if range.as_singleton().is_none() {
-                                if let Some((start, end)) = range.bounding_range() {
-                                    if let Bound::Included(value) | Bound::Excluded(value) = start {
-                                        reporter.report(
-                                            MarkerWarningKind::LexicographicComparison,
-                                            format!(
-                                                "Comparing {l_string} and {value} lexicographically"
-                                            ),
-                                        );
-                                    };
+                    if range.as_singleton().is_none() {
+                        if let Some((start, end)) = range.bounding_range() {
+                            if let Bound::Included(value) | Bound::Excluded(value) = start {
+                                reporter.report(
+                                    MarkerWarningKind::LexicographicComparison,
+                                    format!("Comparing {l_string} and {value} lexicographically"),
+                                );
+                            };
 
-                                    if let Bound::Included(value) | Bound::Excluded(value) = end {
-                                        reporter.report(
-                                            MarkerWarningKind::LexicographicComparison,
-                                            format!(
-                                                "Comparing {l_string} and {value} lexicographically"
-                                            ),
-                                        );
-                                    };
-                                }
-                            }
-
-                            // todo(ibraheem): avoid cloning here, `contains` should accept `&impl Borrow<V>`
-                            let l_string = &l_string.to_string();
-                            range.contains(l_string)
+                            if let Bound::Included(value) | Bound::Excluded(value) = end {
+                                reporter.report(
+                                    MarkerWarningKind::LexicographicComparison,
+                                    format!("Comparing {l_string} and {value} lexicographically"),
+                                );
+                            };
                         }
-                    };
+                    }
 
-                    if value {
-                        return tree.evaluate_optional_environment(env, extras);
+                    // todo(ibraheem): avoid cloning here, `contains` should accept `&impl Borrow<V>`
+                    let l_string = &l_string.to_string();
+                    if range.contains(l_string) {
+                        return tree.evaluate_reporter_impl(env, extras, reporter);
                     }
                 }
             }
             MarkerTreeKind::In(marker) => {
-                let value = env
-                    .map(|env| marker.value().contains(env.get_string(marker.key())))
-                    .unwrap_or(true);
                 return marker
-                    .edge(value)
-                    .evaluate_optional_environment(env, extras);
+                    .edge(marker.value().contains(env.get_string(marker.key())))
+                    .evaluate_reporter_impl(env, extras, reporter);
             }
             MarkerTreeKind::Contains(marker) => {
-                let value = env
-                    .map(|env| env.get_string(marker.key()).contains(marker.value()))
-                    .unwrap_or(true);
                 return marker
-                    .edge(value)
-                    .evaluate_optional_environment(env, extras);
+                    .edge(env.get_string(marker.key()).contains(marker.value()))
+                    .evaluate_reporter_impl(env, extras, reporter);
             }
             MarkerTreeKind::Extra(marker) => {
                 return marker
                     .edge(extras.contains(marker.name()))
-                    .evaluate_optional_environment(env, extras);
+                    .evaluate_reporter_impl(env, extras, reporter);
             }
         }
 
@@ -799,6 +784,31 @@ impl MarkerTree {
         }
     }
 
+    /// Checks if the requirement should be activated with the given set of active extras without evaluating
+    /// the remaining environment markers, i.e. if there is potentially an environment that could activate this
+    /// requirement.
+    pub fn evaluate_extras(&self, extras: &[ExtraName]) -> bool {
+        match self.kind() {
+            MarkerTreeKind::True => true,
+            MarkerTreeKind::False => false,
+            MarkerTreeKind::Version(marker) => marker
+                .children()
+                .any(|(_, tree)| tree.evaluate_extras(extras)),
+            MarkerTreeKind::String(marker) => marker
+                .children()
+                .any(|(_, tree)| tree.evaluate_extras(extras)),
+            MarkerTreeKind::In(marker) => marker
+                .children()
+                .any(|(_, tree)| tree.evaluate_extras(extras)),
+            MarkerTreeKind::Contains(marker) => marker
+                .children()
+                .any(|(_, tree)| tree.evaluate_extras(extras)),
+            MarkerTreeKind::Extra(marker) => marker
+                .edge(extras.contains(marker.name()))
+                .evaluate_extras(extras),
+        }
+    }
+
     /// Same as [`Self::evaluate`], but instead of using logging to warn, you get a Vec with all
     /// warnings collected
     pub fn evaluate_collect_warnings(
@@ -811,7 +821,7 @@ impl MarkerTree {
             warnings.push((kind, warning));
         };
         self.report_deprecated_options(&mut reporter);
-        let result = self.evaluate_reporter_impl(Some(env), extras, &mut reporter);
+        let result = self.evaluate_reporter_impl(env, extras, &mut reporter);
         (result, warnings)
     }
 
@@ -963,6 +973,8 @@ impl MarkerTree {
 
     /// Returns a DNF boolean expression for this marker tree.
     pub fn to_dnf(self) -> Vec<Vec<MarkerExpression>> {
+        // TODO: if an expression leads to true we can omit it's complement
+        // (e.g. `foo or (not foo and bar)` => `foo or bar`).
         pub(crate) fn collect(
             tree: MarkerTree,
             dnf: &mut Vec<Vec<MarkerExpression>>,
@@ -983,16 +995,34 @@ impl MarkerTree {
                     }
 
                     for (tree, range) in paths {
-                        let current = path.len();
-                        for specifier in range.iter().flat_map(VersionSpecifier::from_bounds) {
-                            path.push(MarkerExpression::Version {
-                                key: marker.key().clone(),
-                                specifier,
-                            });
+                        if let Some(excluded) = range_inequality(&range) {
+                            let current = path.len();
+                            for version in excluded {
+                                path.push(MarkerExpression::Version {
+                                    key: marker.key().clone(),
+                                    specifier: VersionSpecifier::not_equals_version(
+                                        version.clone(),
+                                    ),
+                                });
+                            }
+
+                            collect(tree, dnf, path);
+                            path.truncate(current);
+                            continue;
                         }
 
-                        collect(tree, dnf, path);
-                        path.truncate(current);
+                        for bounds in range.iter() {
+                            let current = path.len();
+                            for specifier in VersionSpecifier::from_bounds(bounds) {
+                                path.push(MarkerExpression::Version {
+                                    key: marker.key().clone(),
+                                    specifier,
+                                });
+                            }
+
+                            collect(tree, dnf, path);
+                            path.truncate(current);
+                        }
                     }
                 }
                 MarkerTreeKind::String(marker) => {
@@ -1005,18 +1035,34 @@ impl MarkerTree {
                     }
 
                     for (tree, range) in paths {
-                        let current = path.len();
-                        for (operator, value) in range.iter().flat_map(MarkerOperator::from_bounds)
-                        {
-                            path.push(MarkerExpression::String {
-                                key: marker.key().clone(),
-                                operator,
-                                value,
-                            });
+                        if let Some(excluded) = range_inequality(&range) {
+                            let current = path.len();
+                            for value in excluded {
+                                path.push(MarkerExpression::String {
+                                    key: marker.key().clone(),
+                                    operator: MarkerOperator::NotEqual,
+                                    value: value.clone(),
+                                });
+                            }
+
+                            collect(tree, dnf, path);
+                            path.truncate(current);
+                            continue;
                         }
 
-                        collect(tree, dnf, path);
-                        path.truncate(current);
+                        for bounds in range.iter() {
+                            let current = path.len();
+                            for (operator, value) in MarkerOperator::from_bounds(bounds) {
+                                path.push(MarkerExpression::String {
+                                    key: marker.key().clone(),
+                                    operator,
+                                    value: value.clone(),
+                                });
+                            }
+
+                            collect(tree, dnf, path);
+                            path.truncate(current);
+                        }
                     }
                 }
                 MarkerTreeKind::In(marker) => {
@@ -1124,6 +1170,23 @@ impl MarkerTree {
         }
 
         extra_expression
+    }
+
+    /// Remove the extras from a marker, returning `None` if the marker tree evaluates to `true`.
+    ///
+    /// Any `extra` markers that are always `true` given the provided extras will be removed.
+    /// Any `extra` markers that are always `false` given the provided extras will be left
+    /// unchanged.
+    ///
+    /// For example, if `dev` is a provided extra, given `sys_platform == 'linux' and extra == 'dev'`,
+    /// the marker will be simplified to `sys_platform == 'linux'`.
+    pub fn simplify_python_version(self, version: Range<Version>) -> MarkerTree {
+        MarkerTree(BDD.restrict_versions(self.0, |var| match var {
+            Variable::Version(
+                MarkerValueVersion::PythonVersion | MarkerValueVersion::PythonFullVersion,
+            ) => Some(version.clone()),
+            _ => None,
+        }))
     }
 
     /// Remove the extras from a marker, returning `None` if the marker tree evaluates to `true`.
@@ -1353,13 +1416,34 @@ impl Display for MarkerTreeContent {
     }
 }
 
+fn range_inequality<T>(range: &Range<T>) -> Option<Vec<&T>>
+where
+    T: Ord + Clone + fmt::Debug,
+{
+    if range.is_empty() || range.bounding_range() != Some((Bound::Unbounded, Bound::Unbounded)) {
+        return None;
+    }
+
+    let mut excluded = Vec::new();
+    for ((_, end), (start, _)) in range.iter().tuple_windows() {
+        match (end, start) {
+            (Bound::Excluded(v1), Bound::Excluded(v2)) if v1 == v2 => excluded.push(v1),
+            _ => return None,
+        }
+    }
+
+    Some(excluded)
+}
+
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
 
     use insta::assert_snapshot;
+    use pep440_rs::VersionSpecifier;
     use uv_normalize::ExtraName;
 
+    use crate::marker::range::PubGrubSpecifier;
     use crate::marker::{MarkerEnvironment, MarkerEnvironmentBuilder};
     use crate::{MarkerExpression, MarkerOperator, MarkerTree, MarkerValueString};
 
@@ -1424,6 +1508,35 @@ mod test {
     #[test]
     fn test_marker_negation() {
         let m = |marker_string: &str| -> MarkerTree { marker_string.parse().unwrap() };
+
+        assert_eq!(
+            m("(extra == 'foo' and sys_platform == 'win32') or extra == 'foo'")
+                .simplify_extras(&["foo".parse().unwrap()]),
+            MarkerTree::TRUE
+        );
+
+        assert_eq!(
+            m("(python_version <= '3.11' and sys_platform == 'win32') or python_version > '3.11'")
+                .simplify_python_version(
+                    PubGrubSpecifier::from_pep440_specifier(
+                        &VersionSpecifier::greater_than_version("3.12".parse().unwrap())
+                    )
+                    .unwrap()
+                    .into()
+                ),
+            MarkerTree::TRUE
+        );
+
+        assert_eq!(
+            m("python_version < '3.10'").simplify_python_version(
+                PubGrubSpecifier::from_pep440_specifier(
+                    &VersionSpecifier::greater_than_equal_version("3.7".parse().unwrap())
+                )
+                .unwrap()
+                .into()
+            ),
+            m("python_version < '3.10'")
+        );
 
         assert_eq!(
             m("python_version > '3.6'").not(),

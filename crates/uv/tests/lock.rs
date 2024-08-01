@@ -903,7 +903,7 @@ fn lock_conditional_dependency_extra() -> Result<()> {
     let lockfile = context.temp_dir.join("uv.lock");
 
     deterministic! { context =>
-        uv_snapshot!(context.filters(), context.lock(), @r###"
+    uv_snapshot!(context.filters(), context.lock(), @r###"
         success: true
         exit_code: 0
         ----- stdout -----
@@ -913,13 +913,13 @@ fn lock_conditional_dependency_extra() -> Result<()> {
         Resolved 7 packages in [TIME]
         "###);
 
-        let lock = fs_err::read_to_string(&lockfile).unwrap();
+    let lock = fs_err::read_to_string(&lockfile).unwrap();
 
-        insta::with_settings!({
-            filters => context.filters(),
-        }, {
-            assert_snapshot!(
-                lock, @r###"
+    insta::with_settings!({
+        filters => context.filters(),
+    }, {
+        assert_snapshot!(
+            lock, @r###"
             version = 1
             requires-python = ">=3.7"
             exclude-newer = "2024-03-25 00:00:00 UTC"
@@ -1086,8 +1086,8 @@ fn lock_conditional_dependency_extra() -> Result<()> {
                 { url = "https://files.pythonhosted.org/packages/d2/b2/b157855192a68541a91ba7b2bbcb91f1b4faa51f8bae38d8005c034be524/urllib3-2.0.7-py3-none-any.whl", hash = "sha256:fdb6d215c776278489906c2f8916e6e7d4f5a9b602ccbcfdf7f016fc8da0596e", size = 124213 },
             ]
             "###
-            );
-        });
+        );
+    });
     }
 
     // Install from the lockfile.

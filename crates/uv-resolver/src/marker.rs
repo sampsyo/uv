@@ -53,21 +53,6 @@ pub(crate) fn requires_python_marker(tree: MarkerTree) -> Option<RequiresPythonB
     markers.into_iter().min()
 }
 
-/// Normalizes this marker tree.
-///
-/// This function does a number of operations to normalize a marker tree recursively:
-/// - Sort and flatten all nested expressions.
-/// - Simplify expressions. This includes combining overlapping version ranges, removing duplicate
-///   expressions, and removing redundant expressions.
-/// - Normalize the order of version expressions to the form `<version key> <version op> <version>`
-///   (i.e., not the reverse).
-///
-/// This is useful in cases where creating conjunctions or disjunctions might occur in a non-deterministic
-/// order. This routine will attempt to erase the distinction created by such a construction.
-pub(crate) fn normalize(tree: MarkerTree, bound: Option<&RequiresPythonBound>) -> MarkerTree {
-    tree
-}
-
 // #[cfg(test)]
 // mod tests {
 //     use pep508_rs::TracingReporter;

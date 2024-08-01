@@ -56,6 +56,14 @@ impl Interner {
     pub(crate) fn restrict(&self, i: NodeId, f: impl Fn(&Variable) -> Option<bool>) -> NodeId {
         self.lock().restrict(i, &f)
     }
+
+    pub(crate) fn restrict_versions(
+        &self,
+        i: NodeId,
+        f: impl Fn(&Variable) -> Option<Range<Version>>,
+    ) -> NodeId {
+        self.lock().restrict_versions(i, &f)
+    }
 }
 
 #[derive(Default)]
@@ -229,6 +237,48 @@ impl InternerGuard<'_> {
         let children = node.children.map(|node| self.restrict(node.negate(i), f));
         self.create_node(node.var.clone(), children)
     }
+
+    pub(crate) fn restrict_versions(
+        &mut self,
+        i: NodeId,
+        f: &impl Fn(&Variable) -> Option<Range<Version>>,
+    ) -> NodeId {
+        if matches!(i, NodeId::TRUE | NodeId::FALSE) {
+            return i;
+        }
+
+        let node = self.shared.node(i);
+        if let RangeMap::Version { ref map } = node.children {
+            if let Some(restricted) = f(&node.var) {
+                let mut simplified = Vec::new();
+                for (range, node) in map {
+                    // Don't perform range splitting to avoid overcomplicating the expression,
+                    // simply remove unnecessary ranges.
+                    // TODO: does this affect canonicalization? instead we might want a "trivially
+                    // true" marker node that we omit from the DNF completely, and perform a full merge
+                    // here.
+                    if !range.is_disjoint(&restricted) {
+                        simplified.push((range.clone(), *node));
+                        continue;
+                    }
+
+                    match simplified.last_mut() {
+                        Some((prev, node)) if *node == NodeId::TRUE => *prev = prev.union(&range),
+                        _ => simplified.push((range.clone(), NodeId::TRUE)),
+                    };
+                }
+
+                return self
+                    .create_node(node.var.clone(), RangeMap::Version { map: simplified })
+                    .negate(i);
+            }
+        }
+
+        let children = node
+            .children
+            .map(|node| self.restrict_versions(node.negate(i), f));
+        self.create_node(node.var.clone(), children)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -340,7 +390,7 @@ impl RangeMap {
 
             let node = f(*node, *other_node);
             match combined.last_mut() {
-                Some((range, last)) if *last == node => {
+                Some((range, prev)) if *prev == node => {
                     *range = range.union(&intersection);
                 }
                 _ => {
