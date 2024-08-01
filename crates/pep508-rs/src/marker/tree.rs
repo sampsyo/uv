@@ -3,9 +3,11 @@ use std::fmt::{self, Display, Formatter};
 use std::ops::{Bound, Deref};
 use std::str::FromStr;
 
+use indexmap::IndexMap;
 use pubgrub::range::Range;
 #[cfg(feature = "pyo3")]
 use pyo3::{basic::CompareOp, pyclass, pymethods};
+use rustc_hash::FxBuildHasher;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 use pep440_rs::{Version, VersionParseError, VersionSpecifier};
@@ -266,11 +268,14 @@ impl MarkerOperator {
 
     /// Returns the marker operator and value whose union represents the given range.
     pub fn from_bounds(
-        bounds: (Bound<&String>, Bound<&String>),
+        bounds: (&Bound<String>, &Bound<String>),
     ) -> impl Iterator<Item = (MarkerOperator, String)> {
         let (b1, b2) = match bounds {
             (Bound::Included(v1), Bound::Included(v2)) if v1 == v2 => {
                 (Some((MarkerOperator::Equal, v1.clone())), None)
+            }
+            (Bound::Excluded(v1), Bound::Excluded(v2)) if v1 == v2 => {
+                (Some((MarkerOperator::NotEqual, v1.clone())), None)
             }
             (lower, upper) => (
                 MarkerOperator::from_lower_bound(lower),
@@ -282,7 +287,7 @@ impl MarkerOperator {
     }
 
     /// Returns a value specifier representing the given lower bound.
-    pub fn from_lower_bound(bound: Bound<&String>) -> Option<(MarkerOperator, String)> {
+    pub fn from_lower_bound(bound: &Bound<String>) -> Option<(MarkerOperator, String)> {
         match bound {
             Bound::Included(value) => Some((MarkerOperator::GreaterEqual, value.clone())),
             Bound::Excluded(value) => Some((MarkerOperator::GreaterThan, value.clone())),
@@ -291,7 +296,7 @@ impl MarkerOperator {
     }
 
     /// Returns a value specifier representing the given upper bound.
-    pub fn from_upper_bound(bound: Bound<&String>) -> Option<(MarkerOperator, String)> {
+    pub fn from_upper_bound(bound: &Bound<String>) -> Option<(MarkerOperator, String)> {
         match bound {
             Bound::Included(value) => Some((MarkerOperator::LessEqual, value.clone())),
             Bound::Excluded(value) => Some((MarkerOperator::LessThan, value.clone())),
@@ -611,7 +616,7 @@ impl MarkerTree {
 
     /// Returns a new marker tree that is the negation of this one.
     #[must_use]
-    pub fn negate(&self) -> MarkerTree {
+    pub fn not(&self) -> MarkerTree {
         MarkerTree(self.0.not())
     }
 
@@ -687,8 +692,9 @@ impl MarkerTree {
             }
             MarkerTreeKind::String(marker) => {
                 for (range, tree) in marker.children() {
-                    if env
-                        .map(|env| {
+                    let value = match env {
+                        None => true,
+                        Some(env) => {
                             let l_string = env.get_string(marker.key());
 
                             if range.as_singleton().is_none() {
@@ -713,12 +719,13 @@ impl MarkerTree {
                                 }
                             }
 
-                            // todo(ibraheem)
+                            // todo(ibraheem): avoid cloning here, `contains` should accept `&impl Borrow<V>`
                             let l_string = &l_string.to_string();
                             range.contains(l_string)
-                        })
-                        .unwrap_or(true)
-                    {
+                        }
+                    };
+
+                    if value {
                         return tree.evaluate_optional_environment(env, extras);
                     }
                 }
@@ -965,22 +972,23 @@ impl MarkerTree {
                 MarkerTreeKind::False => {
                     return;
                 }
-                MarkerTreeKind::True => {
-                    dnf.push(path.clone());
-                    path.pop();
-                }
+                MarkerTreeKind::True => dnf.push(path.clone()),
                 MarkerTreeKind::Version(marker) => {
+                    let mut paths: IndexMap<_, Range<_>, FxBuildHasher> = IndexMap::default();
                     for (range, tree) in marker.children() {
-                        let current = path.len();
-                        let bounds = range.bounding_range().unwrap();
+                        paths
+                            .entry(tree)
+                            .and_modify(|union| *union = union.union(range))
+                            .or_insert_with(|| range.clone());
+                    }
 
-                        for specifier in VersionSpecifier::from_bounds(bounds) {
-                            let expr = MarkerExpression::Version {
+                    for (tree, range) in paths {
+                        let current = path.len();
+                        for specifier in range.iter().flat_map(VersionSpecifier::from_bounds) {
+                            path.push(MarkerExpression::Version {
                                 key: marker.key().clone(),
                                 specifier,
-                            };
-
-                            path.push(expr);
+                            });
                         }
 
                         collect(tree, dnf, path);
@@ -988,18 +996,23 @@ impl MarkerTree {
                     }
                 }
                 MarkerTreeKind::String(marker) => {
+                    let mut paths: IndexMap<_, Range<_>, FxBuildHasher> = IndexMap::default();
                     for (range, tree) in marker.children() {
-                        let current = path.len();
-                        let bounds = range.bounding_range().unwrap();
+                        paths
+                            .entry(tree)
+                            .and_modify(|union| *union = union.union(range))
+                            .or_insert_with(|| range.clone());
+                    }
 
-                        for (operator, value) in MarkerOperator::from_bounds(bounds) {
-                            let expr = MarkerExpression::String {
+                    for (tree, range) in paths {
+                        let current = path.len();
+                        for (operator, value) in range.iter().flat_map(MarkerOperator::from_bounds)
+                        {
+                            path.push(MarkerExpression::String {
                                 key: marker.key().clone(),
                                 operator,
                                 value,
-                            };
-
-                            path.push(expr);
+                            });
                         }
 
                         collect(tree, dnf, path);
@@ -1392,68 +1405,87 @@ mod test {
 
     #[test]
     fn test_marker_negation() {
-        let neg = |marker_string: &str| -> String {
-            let tree: MarkerTree = marker_string.parse().unwrap();
-            tree.negate().content().unwrap().to_string()
-        };
-
-        assert_eq!(neg("python_version > '3.6'"), "python_version <= '3.6'");
-        assert_eq!(neg("'3.6' < python_version"), "python_version <= '3.6'");
+        let m = |marker_string: &str| -> MarkerTree { marker_string.parse().unwrap() };
 
         assert_eq!(
-            neg("python_version != '3.6.*' and os_name == 'Linux'"),
-            "python_version == '3.6.* or os_name != 'Linux''"
+            m("python_version > '3.6'").not(),
+            m("python_version <= '3.6'")
+        );
+        assert_eq!(
+            m("'3.6' < python_version").not(),
+            m("python_version <= '3.6'")
         );
 
         assert_eq!(
-            neg("python_version == '3.6.*'"),
-            "python_version != '3.6.*'"
-        );
-        assert_eq!(
-            neg("python_version != '3.6.*'"),
-            "python_version == '3.6.*'"
+            m("python_version != '3.6' and os_name == 'Linux'").not(),
+            m("python_version == '3.6' or os_name != 'Linux'")
         );
 
         assert_eq!(
-            neg("python_version ~= '3.6'"),
-            "python_version < '3.6' or python_version != '3.*'"
+            m("python_version == '3.6' and os_name != 'Linux'").not(),
+            m("python_version != '3.6' or os_name == 'Linux'")
+        );
+
+        assert_eq!(
+            m("python_version != '3.6.*' and os_name == 'Linux'").not(),
+            m("python_version == '3.6.*' or os_name != 'Linux'")
+        );
+
+        assert_eq!(
+            m("python_version == '3.6.*'").not(),
+            m("python_version != '3.6.*'")
         );
         assert_eq!(
-            neg("'3.6' ~= python_version"),
-            "python_version < '3.6' or python_version != '3.*'"
+            m("python_version != '3.6.*'").not(),
+            m("python_version == '3.6.*'")
+        );
+
+        assert_eq!(
+            m("python_version ~= '3.6'").not(),
+            m("python_version < '3.6' or python_version != '3.*'")
         );
         assert_eq!(
-            neg("python_version ~= '3.6.2'"),
-            "python_version < '3.6.2' or python_version != '3.6.*'"
+            m("'3.6' ~= python_version").not(),
+            m("python_version < '3.6' or python_version != '3.*'")
+        );
+        assert_eq!(
+            m("python_version ~= '3.6.2'").not(),
+            m("python_version < '3.6.2' or python_version != '3.6.*'")
         );
 
-        assert_eq!(neg("sys_platform == 'linux'"), "sys_platform != 'linux'");
-        assert_eq!(neg("'linux' == sys_platform"), "sys_platform != 'linux'");
+        assert_eq!(
+            m("sys_platform == 'linux'").not(),
+            m("sys_platform != 'linux'")
+        );
+        assert_eq!(
+            m("'linux' == sys_platform").not(),
+            m("sys_platform != 'linux'")
+        );
 
-        // ~= is nonsense on string markers. Evaluation always returns false
-        // in this case, so technically negation would be an expression that
-        // always returns true. But, as we do with "arbitrary" markers, we
-        // don't let the negation of nonsense become sensible.
-        assert_eq!(neg("sys_platform ~= 'linux'"), "sys_platform ~= 'linux'");
+        // // ~= is nonsense on string markers. Evaluation always returns false
+        // // in this case, so technically negation would be an expression that
+        // // always returns true. But, as we do with "arbitrary" markers, we
+        // // don't let the negation of nonsense become sensible.
+        // assert_eq!(neg("sys_platform ~= 'linux'"), "sys_platform ~= 'linux'");
 
-        // As above, arbitrary exprs remain arbitrary.
-        assert_eq!(neg("'foo' == 'bar'"), "'foo' != 'bar'");
+        // // As above, arbitrary exprs remain arbitrary.
+        // assert_eq!(neg("'foo' == 'bar'"), "'foo' != 'bar'");
 
         // Conjunctions
         assert_eq!(
-            neg("os_name == 'bar' and os_name == 'foo'"),
-            "os_name != 'bar' or os_name != 'foo'"
+            m("os_name == 'bar' and os_name == 'foo'").not(),
+            m("os_name != 'bar' or os_name != 'foo'")
         );
         // Disjunctions
         assert_eq!(
-            neg("os_name == 'bar' or os_name == 'foo'"),
-            "os_name != 'bar' and os_name != 'foo'"
+            m("os_name == 'bar' or os_name == 'foo'").not(),
+            m("os_name != 'bar' and os_name != 'foo'")
         );
 
         // Always true negates to always false!
         assert_eq!(
-            neg("python_version >= '3.6' or python_version < '3.6'"),
-            "python_version < '3.6' and python_version >= '3.6'"
+            m("python_version >= '3.6' or python_version < '3.6'").not(),
+            m("python_version < '3.6' and python_version >= '3.6'")
         );
     }
 

@@ -98,7 +98,6 @@ impl RequiresPython {
         // Convert back to PEP 440 specifiers.
         let specifiers = range
             .iter()
-            .map(|(upper, lower)| (upper.as_ref(), lower.as_ref()))
             .flat_map(VersionSpecifier::from_bounds)
             .collect();
 
@@ -108,7 +107,7 @@ impl RequiresPython {
     /// Narrow the [`RequiresPython`] to the given version, if it's stricter (i.e., greater) than
     /// the current target.
     pub fn narrow(&self, target: &RequiresPythonBound) -> Option<Self> {
-        let target = VersionSpecifiers::from(VersionSpecifier::from_lower_bound(target.as_ref())?);
+        let target = VersionSpecifiers::from(VersionSpecifier::from_lower_bound(target)?);
         Self::union(std::iter::once(&target))
             .ok()
             .flatten()

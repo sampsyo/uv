@@ -400,6 +400,14 @@ impl VersionSpecifier {
         }
     }
 
+    /// `!=<version>`
+    pub fn not_equals_version(version: Version) -> Self {
+        Self {
+            operator: Operator::NotEqual,
+            version,
+        }
+    }
+
     /// `>=<version>`
     pub fn greater_than_equal_version(version: Version) -> Self {
         Self {
@@ -449,11 +457,14 @@ impl VersionSpecifier {
 
     /// Returns the version specifiers whose union represents the given range.
     pub fn from_bounds(
-        bounds: (Bound<&Version>, Bound<&Version>),
+        bounds: (&Bound<Version>, &Bound<Version>),
     ) -> impl Iterator<Item = VersionSpecifier> {
         let (b1, b2) = match bounds {
             (Bound::Included(v1), Bound::Included(v2)) if v1 == v2 => {
                 (Some(VersionSpecifier::equals_version(v1.clone())), None)
+            }
+            (Bound::Excluded(v1), Bound::Excluded(v2)) if v1 == v2 => {
+                (Some(VersionSpecifier::not_equals_version(v1.clone())), None)
             }
             (lower, upper) => (
                 VersionSpecifier::from_lower_bound(lower),
@@ -465,7 +476,7 @@ impl VersionSpecifier {
     }
 
     /// Returns a version specifier representing the given lower bound.
-    pub fn from_lower_bound(bound: Bound<&Version>) -> Option<VersionSpecifier> {
+    pub fn from_lower_bound(bound: &Bound<Version>) -> Option<VersionSpecifier> {
         match bound {
             Bound::Included(version) => Some(VersionSpecifier::greater_than_equal_version(
                 version.clone(),
@@ -478,7 +489,7 @@ impl VersionSpecifier {
     }
 
     /// Returns a version specifier representing the given upper bound.
-    pub fn from_upper_bound(bound: Bound<&Version>) -> Option<VersionSpecifier> {
+    pub fn from_upper_bound(bound: &Bound<Version>) -> Option<VersionSpecifier> {
         match bound {
             Bound::Included(version) => {
                 Some(VersionSpecifier::less_than_equal_version(version.clone()))

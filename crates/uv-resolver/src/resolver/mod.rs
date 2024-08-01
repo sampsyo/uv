@@ -2935,7 +2935,7 @@ impl PossibleForkGroups {
             .forks
             .iter()
             .fold(MarkerTree::FALSE, |tree, fork| tree.or(fork.union()));
-        let missing = have.negate();
+        let missing = have.not();
         if missing.is_false() {
             return None;
         }
