@@ -1094,11 +1094,16 @@ impl MarkerTree {
     ///
     /// For example, if `dev` is a provided extra, given `sys_platform == 'linux' and extra == 'dev'`,
     /// the marker will be simplified to `sys_platform == 'linux'`.
-    pub fn simplify_python_version(self, version: Range<Version>) -> MarkerTree {
+    pub fn simplify_python_versions(
+        self,
+        python_version: Range<Version>,
+        full_python_version: Range<Version>,
+    ) -> MarkerTree {
         MarkerTree(BDD.restrict_versions(self.0, |var| match var {
-            Variable::Version(
-                MarkerValueVersion::PythonVersion | MarkerValueVersion::PythonFullVersion,
-            ) => Some(version.clone()),
+            Variable::Version(MarkerValueVersion::PythonVersion) => Some(python_version.clone()),
+            Variable::Version(MarkerValueVersion::PythonFullVersion) => {
+                Some(full_python_version.clone())
+            }
             _ => None,
         }))
     }
@@ -1164,7 +1169,7 @@ impl VersionMarkerTree<'_> {
         &self.key
     }
 
-    pub fn children(&self) -> impl Iterator<Item = (&Range<Version>, MarkerTree)> + '_ {
+    pub fn children(&self) -> impl ExactSizeIterator<Item = (&Range<Version>, MarkerTree)> + '_ {
         self.map
             .iter()
             .map(|(range, node)| (range, MarkerTree(node.negate(self.id))))
@@ -1183,7 +1188,7 @@ impl StringMarkerTree<'_> {
         &self.key
     }
 
-    pub fn children(&self) -> impl Iterator<Item = (&Range<String>, MarkerTree)> {
+    pub fn children(&self) -> impl ExactSizeIterator<Item = (&Range<String>, MarkerTree)> {
         self.map
             .iter()
             .map(|(range, node)| (range, MarkerTree(node.negate(self.id))))
@@ -1457,7 +1462,7 @@ mod test {
     }
 
     #[test]
-    fn test_marker_negation() {
+    fn simplify() {
         let m = |marker_string: &str| -> MarkerTree { marker_string.parse().unwrap() };
 
         assert_eq!(
@@ -1468,9 +1473,14 @@ mod test {
 
         assert_eq!(
             m("(python_version <= '3.11' and sys_platform == 'win32') or python_version > '3.11'")
-                .simplify_python_version(
+                .simplify_python_versions(
                     PubGrubSpecifier::from_pep440_specifier(
                         &VersionSpecifier::greater_than_version("3.12".parse().unwrap())
+                    )
+                    .unwrap()
+                    .into(),
+                    PubGrubSpecifier::from_pep440_specifier(
+                        &VersionSpecifier::greater_than_version("3.12.1".parse().unwrap())
                     )
                     .unwrap()
                     .into()
@@ -1479,20 +1489,67 @@ mod test {
         );
 
         assert_eq!(
-            m("python_version < '3.10'").simplify_python_version(
-                PubGrubSpecifier::from_pep440_specifier(
-                    &VersionSpecifier::greater_than_equal_version("3.7".parse().unwrap())
-                )
-                .unwrap()
-                .into()
-            ),
             m("python_version < '3.10'")
+                .simplify_python_versions(
+                    PubGrubSpecifier::from_pep440_specifier(
+                        &VersionSpecifier::greater_than_equal_version("3.7".parse().unwrap())
+                    )
+                    .unwrap()
+                    .into(),
+                    PubGrubSpecifier::from_pep440_specifier(
+                        &VersionSpecifier::greater_than_equal_version("3.7".parse().unwrap())
+                    )
+                    .unwrap()
+                    .into()
+                )
+                .contents()
+                .unwrap()
+                .to_string(),
+            "python_version < '3.10'"
         );
+
+        assert_eq!(
+            "python_version <= '3.12'"
+                .parse::<MarkerTree>()
+                .unwrap()
+                .simplify_python_versions(
+                    PubGrubSpecifier::from_pep440_specifier(
+                        &VersionSpecifier::greater_than_version("3.12".parse().unwrap())
+                    )
+                    .unwrap()
+                    .into(),
+                    PubGrubSpecifier::from_pep440_specifier(
+                        &VersionSpecifier::greater_than_version("3.12.1".parse().unwrap())
+                    )
+                    .unwrap()
+                    .into()
+                ),
+            MarkerTree::FALSE
+        );
+    }
+
+    #[test]
+    fn no_pre_release() {
+        let m = |marker_string: &str| -> MarkerTree { marker_string.parse().unwrap() };
+
+        assert!(m("python_full_version > '3.10' or python_full_version <= '3.10'").is_true());
+        assert!(
+            m("python_full_version > '3.10' or python_full_version <= '3.10'")
+                .not()
+                .is_false()
+        );
+        assert!(m("python_full_version > '3.10' and python_full_version <= '3.10'").is_false());
+    }
+
+    #[test]
+    fn test_marker_negation() {
+        let m = |marker_string: &str| -> MarkerTree { marker_string.parse().unwrap() };
 
         assert_eq!(
             m("python_version > '3.6'").not(),
             m("python_version <= '3.6'")
         );
+
         assert_eq!(
             m("'3.6' < python_version").not(),
             m("python_version <= '3.6'")

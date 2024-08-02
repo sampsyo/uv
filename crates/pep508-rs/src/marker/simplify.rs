@@ -22,7 +22,7 @@ pub(crate) fn to_dnf(tree: &MarkerTree) -> Vec<Vec<MarkerExpression>> {
 
         let mut redundant_clauses = Vec::new();
         for (j, other_solution) in dnf.iter().enumerate() {
-            if i == j {
+            if i == j || redundant_solutions.contains(&j) {
                 continue;
             }
 
@@ -197,16 +197,32 @@ fn collect_dnf(
 }
 
 fn collect_paths<'a, T>(
-    map: impl Iterator<Item = (&'a Range<T>, MarkerTree)>,
+    map: impl ExactSizeIterator<Item = (&'a Range<T>, MarkerTree)>,
 ) -> IndexMap<MarkerTree, Range<T>, FxBuildHasher>
 where
     T: Ord + Clone + 'a,
 {
+    let len = map.len();
+
     let mut paths: IndexMap<_, Range<_>, FxBuildHasher> = IndexMap::default();
-    for (range, tree) in map {
+    for (i, (range, tree)) in map.enumerate() {
+        let (mut start, mut end) = range.bounding_range().unwrap();
+        match (start, end) {
+            (Bound::Included(v1), Bound::Included(v2)) if v1 == v2 => {}
+            _ => {
+                if i == 0 {
+                    start = Bound::Unbounded;
+                }
+                if i == len - 1 {
+                    end = Bound::Unbounded;
+                }
+            }
+        }
+        let range = Range::from_range_bounds((start.cloned(), end.cloned()));
+
         paths
             .entry(tree)
-            .and_modify(|union| *union = union.union(range))
+            .and_modify(|union| *union = union.union(&range))
             .or_insert_with(|| range.clone());
     }
 

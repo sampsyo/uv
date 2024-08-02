@@ -203,15 +203,13 @@ impl InternerGuard<'_> {
         // Perform Shannon Expansion for the higher order variable.
         let (x, y) = (self.shared.node(xi), self.shared.node(yi));
         let (func, children) = if x.var < y.var {
-            let children = x.children.map(|node| self.and(node.negate(xi), yi));
+            let children = x.children.map(xi, |node| self.and(node, yi));
             (x.var.clone(), children)
         } else if y.var < x.var {
-            let children = y.children.map(|node| self.and(node.negate(yi), xi));
+            let children = y.children.map(yi, |node| self.and(node, xi));
             (y.var.clone(), children)
         } else {
-            let children = x
-                .children
-                .merge(&y.children, |x, y| self.and(x.negate(xi), y.negate(yi)));
+            let children = x.children.merge(xi, &y.children, yi, |x, y| self.and(x, y));
             (x.var.clone(), children)
         };
 
@@ -234,7 +232,7 @@ impl InternerGuard<'_> {
             }
         }
 
-        let children = node.children.map(|node| self.restrict(node.negate(i), f));
+        let children = node.children.map(i, |node| self.restrict(node, f));
         self.create_node(node.var.clone(), children)
     }
 
@@ -249,23 +247,16 @@ impl InternerGuard<'_> {
 
         let node = self.shared.node(i);
         if let RangeMap::Version { ref map } = node.children {
-            if let Some(restricted) = f(&node.var) {
+            if let Some(allowed) = f(&node.var) {
                 let mut simplified = Vec::new();
                 for (range, node) in map {
-                    // Don't perform range splitting to avoid overcomplicating the expression,
-                    // simply remove unnecessary ranges.
-                    // TODO: does this affect canonicalization? instead we might want a "trivially
-                    // true" marker node that we omit from the DNF completely, and perform a full merge
-                    // here.
-                    if !range.is_disjoint(&restricted) {
-                        simplified.push((range.clone(), *node));
+                    let restricted = range.intersection(&allowed);
+                    if restricted.is_empty() {
                         continue;
                     }
 
-                    match simplified.last_mut() {
-                        Some((prev, node)) if *node == NodeId::TRUE => *prev = prev.union(&range),
-                        _ => simplified.push((range.clone(), NodeId::TRUE)),
-                    };
+                    // no need to merge as more restricted ranges and already disjoint
+                    simplified.push((restricted.clone(), *node));
                 }
 
                 return self
@@ -274,10 +265,49 @@ impl InternerGuard<'_> {
             }
         }
 
-        let children = node
-            .children
-            .map(|node| self.restrict_versions(node.negate(i), f));
+        let children = node.children.map(i, |node| self.restrict_versions(node, f));
         self.create_node(node.var.clone(), children)
+    }
+}
+
+fn can_merge<T>(range1: &Range<T>, range2: &Range<T>) -> bool
+where
+    T: Ord + Clone + fmt::Debug,
+{
+    let Some((_, end)) = range1.bounding_range() else {
+        return false;
+    };
+    let Some((start, _)) = range2.bounding_range() else {
+        return false;
+    };
+
+    match (end, start) {
+        (Bound::Included(v1), Bound::Excluded(v2)) if v1 == v2 => true,
+        (Bound::Excluded(v1), Bound::Included(v2)) if v1 == v2 => true,
+        _ => false,
+    }
+}
+
+fn compare_range_start<T>(range1: &Range<T>, range2: &Range<T>) -> Ordering
+where
+    T: Ord,
+{
+    let (start1, _) = range1.bounding_range().unwrap();
+    let (start2, _) = range2.bounding_range().unwrap();
+
+    match (start1, start2) {
+        (Bound::Unbounded, _) => Ordering::Less,
+        (_, Bound::Unbounded) => Ordering::Greater,
+        (Bound::Included(version1), Bound::Excluded(version2)) if version1 == version2 => {
+            Ordering::Less
+        }
+        (Bound::Excluded(version1), Bound::Included(version2)) if version1 == version2 => {
+            Ordering::Greater
+        }
+        (
+            Bound::Included(version1) | Bound::Excluded(version1),
+            Bound::Included(version2) | Bound::Excluded(version2),
+        ) => version1.cmp(version2),
     }
 }
 
@@ -344,13 +374,19 @@ pub(crate) enum RangeMap {
 }
 
 impl RangeMap {
-    fn merge(&self, other: &RangeMap, mut f: impl FnMut(NodeId, NodeId) -> NodeId) -> RangeMap {
-        match (self, other) {
-            (RangeMap::Version { map }, RangeMap::Version { map: other }) => RangeMap::Version {
-                map: RangeMap::merge_maps(map, other, f),
+    fn merge(
+        &self,
+        parent: NodeId,
+        map2: &RangeMap,
+        parent2: NodeId,
+        mut f: impl FnMut(NodeId, NodeId) -> NodeId,
+    ) -> RangeMap {
+        match (self, map2) {
+            (RangeMap::Version { map }, RangeMap::Version { map: map2 }) => RangeMap::Version {
+                map: RangeMap::merge_ranges(map, parent, map2, parent2, f),
             },
-            (RangeMap::String { map }, RangeMap::String { map: other }) => RangeMap::String {
-                map: RangeMap::merge_maps(map, other, f),
+            (RangeMap::String { map }, RangeMap::String { map: map2 }) => RangeMap::String {
+                map: RangeMap::merge_ranges(map, parent, map2, parent2, f),
             },
             (
                 RangeMap::Boolean { high, low },
@@ -366,76 +402,56 @@ impl RangeMap {
         }
     }
 
-    fn merge_maps<T>(
+    fn merge_ranges<T>(
         map: &Vec<(Range<T>, NodeId)>,
-        other_map: &Vec<(Range<T>, NodeId)>,
+        parent: NodeId,
+        map2: &Vec<(Range<T>, NodeId)>,
+        parent2: NodeId,
         mut f: impl FnMut(NodeId, NodeId) -> NodeId,
     ) -> Vec<(Range<T>, NodeId)>
     where
-        T: Clone + Ord,
+        T: Clone + Ord + fmt::Debug,
     {
-        let mut versions = map.clone();
-        let mut other_versions = other_map.clone();
-
         let mut combined: Vec<(Range<T>, NodeId)> = Vec::new();
-        loop {
-            let first = versions.first();
-            let Some((range, node)) = first else {
-                break;
-            };
-
-            let (other_range, other_node) = other_versions.first().unwrap();
-
-            let intersection = range.intersection(&other_range);
-
-            let node = f(*node, *other_node);
-            match combined.last_mut() {
-                Some((range, prev)) if *prev == node => {
-                    *range = range.union(&intersection);
+        for (range, node) in map.iter() {
+            for (range2, node2) in map2.iter() {
+                let intersection = range2.intersection(&range);
+                if intersection.is_empty() {
+                    continue;
                 }
-                _ => {
-                    combined.push((intersection.clone(), node));
+
+                let node = f(node.negate(parent), node2.negate(parent2));
+                match combined.last_mut() {
+                    Some((range, prev)) if *prev == node && can_merge(range, &intersection) => {
+                        *range = range.union(&intersection);
+                    }
+                    _ => combined.push((intersection.clone(), node)),
                 }
-            };
-
-            let range = range.intersection(&intersection.complement());
-            let other_range = other_range.intersection(&intersection.complement());
-
-            if range.is_empty() {
-                versions.remove(0);
-            } else {
-                versions[0].0 = range;
-            }
-
-            if other_range.is_empty() {
-                other_versions.remove(0);
-            } else {
-                other_versions[0].0 = other_range;
             }
         }
 
         combined
     }
 
-    fn map(&self, mut f: impl FnMut(NodeId) -> NodeId) -> RangeMap {
+    fn map(&self, parent: NodeId, mut f: impl FnMut(NodeId) -> NodeId) -> RangeMap {
         match self {
             RangeMap::Version { map } => RangeMap::Version {
                 map: map
                     .iter()
                     .cloned()
-                    .map(|(range, node)| (range, f(node)))
+                    .map(|(range, node)| (range, f(node.negate(parent))))
                     .collect(),
             },
             RangeMap::String { map } => RangeMap::String {
                 map: map
                     .iter()
                     .cloned()
-                    .map(|(range, node)| (range, f(node)))
+                    .map(|(range, node)| (range, f(node.negate(parent))))
                     .collect(),
             },
             RangeMap::Boolean { high, low } => RangeMap::Boolean {
-                low: f(*low),
-                high: f(*high),
+                low: f(low.negate(parent)),
+                high: f(high.negate(parent)),
             },
         }
     }
@@ -471,11 +487,15 @@ impl RangeMap {
     }
 
     fn from_specifier(key: MarkerValueVersion, specifier: VersionSpecifier) -> RangeMap {
-        let specifier = if key == MarkerValueVersion::PythonVersion {
-            PubGrubSpecifier::from_release_specifier(&specifier).unwrap()
-        } else {
-            PubGrubSpecifier::from_pep440_specifier(&specifier).unwrap()
-        };
+        // The decision diagram relies on the assumption that the negation of a marker tree
+        // is the complement of the marker space. However, pre-release versions violate
+        // this assumption. For example, the marker `python_version > '3.9' or python_version <= '3.9'`
+        // does not match `python_version == 3.9.0a0`. However, it's negation,
+        // `python_version > '3.9' and python_version <= '3.9'` also does not include `3.9.0a0`, and is
+        // actually `false`.
+        //
+        // For this reason we ignore pre-release versions completely when evaluating markers.
+        let specifier = PubGrubSpecifier::from_release_specifier(&specifier).unwrap();
 
         RangeMap::Version {
             map: RangeMap::from_range(specifier.into()),
@@ -500,25 +520,7 @@ impl RangeMap {
         }
 
         // Disjoint set so we don't care about equality.
-        versions.sort_by(|(range1, _), (range2, _)| {
-            let (start1, _) = range1.bounding_range().unwrap();
-            let (start2, _) = range2.bounding_range().unwrap();
-
-            match (start1, start2) {
-                (Bound::Unbounded, _) => Ordering::Less,
-                (_, Bound::Unbounded) => Ordering::Greater,
-                (Bound::Included(version1), Bound::Excluded(version2)) if version1 == version2 => {
-                    Ordering::Less
-                }
-                (Bound::Excluded(version1), Bound::Included(version2)) if version1 == version2 => {
-                    Ordering::Greater
-                }
-                (
-                    Bound::Included(version1) | Bound::Excluded(version1),
-                    Bound::Included(version2) | Bound::Excluded(version2),
-                ) => version1.cmp(version2),
-            }
-        });
+        versions.sort_by(|(range1, _), (range2, _)| compare_range_start(range1, range2));
 
         versions
     }

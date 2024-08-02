@@ -5,6 +5,7 @@ use petgraph::{
     graph::{Graph, NodeIndex},
     Directed,
 };
+use pubgrub::Range;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use distribution_types::{
@@ -161,9 +162,10 @@ impl ResolutionGraph {
         if let Some(ref requires_python) = requires_python {
             for edge in petgraph.edge_indices() {
                 if let Some(marker) = petgraph[edge].take() {
-                    petgraph[edge] = Some(
-                        marker.simplify_python_version(requires_python.bound().clone().into()),
-                    );
+                    petgraph[edge] = Some(marker.simplify_python_versions(
+                        Range::from(requires_python.bound_major_minor().clone()),
+                        Range::from(requires_python.bound().clone()),
+                    ));
                 }
             }
         }
@@ -186,6 +188,8 @@ impl ResolutionGraph {
                             .expect("A non-forking resolution exists in forking mode")
                             .clone()
                     })
+                    // Any unsatisfiable forks were skipped.
+                    .filter(|fork| !fork.is_false())
                     .collect(),
             )
         };
