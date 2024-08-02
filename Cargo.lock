@@ -448,6 +448,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "boxcar"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "510a90332002c1af3317ef6b712f0dab697f30bbe809b86965eac2923c0bca8e"
+
+[[package]]
 name = "brotli"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2456,13 +2462,18 @@ dependencies = [
 name = "pep508_rs"
 version = "0.6.0"
 dependencies = [
+ "boxcar",
  "derivative",
+ "indexmap",
  "insta",
+ "itertools 0.13.0",
  "log",
  "pep440_rs",
+ "pubgrub",
  "pyo3",
  "pyo3-log",
  "regex",
+ "rustc-hash 2.0.0",
  "schemars",
  "serde",
  "serde_json",
