@@ -8,12 +8,62 @@ use rustc_hash::FxBuildHasher;
 
 use crate::{ExtraOperator, MarkerExpression, MarkerOperator, MarkerTree, MarkerTreeKind};
 
-pub(crate) struct Node<T> {
-    range: Range<T>,
-    implied: bool,
+pub(crate) fn to_dnf(tree: &MarkerTree) -> Vec<Vec<MarkerExpression>> {
+    let mut dnf = Vec::new();
+    collect_dnf(tree, &mut dnf, &mut Vec::new());
+
+    if dnf.len() > 10 {
+        return dnf;
+    }
+
+    let mut redundant_solutions = Vec::new();
+    'redundant: for i in 0..dnf.len() {
+        let solution = &dnf[i];
+
+        let mut redundant_clauses = Vec::new();
+        for (j, other_solution) in dnf.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+
+            if other_solution
+                .iter()
+                .all(|clause| solution.contains(&clause))
+            {
+                redundant_solutions.push(i);
+                continue 'redundant;
+            }
+
+            for (i, skip_clause) in solution.iter().enumerate() {
+                let negation = skip_clause.negate();
+                if other_solution.iter().all(|clause| {
+                    if clause == skip_clause {
+                        return false;
+                    }
+
+                    solution.contains(clause)
+                        || negation
+                            .as_ref()
+                            .is_some_and(|negation| *negation == *clause)
+                }) {
+                    redundant_clauses.push(i);
+                }
+            }
+        }
+
+        for clause in redundant_clauses.into_iter().rev() {
+            dnf[i].remove(clause);
+        }
+    }
+
+    for i in redundant_solutions.into_iter().rev() {
+        dnf.remove(i);
+    }
+
+    dnf
 }
 
-pub(crate) fn collect_dnf(
+fn collect_dnf(
     tree: &MarkerTree,
     dnf: &mut Vec<Vec<MarkerExpression>>,
     path: &mut Vec<MarkerExpression>,
@@ -26,14 +76,8 @@ pub(crate) fn collect_dnf(
             }
         }
         MarkerTreeKind::Version(marker) => {
-            let paths = collect_paths(marker.children());
-            for (tree, node) in paths {
-                if node.implied {
-                    collect_dnf(&tree, dnf, path);
-                    continue;
-                }
-
-                if let Some(excluded) = range_inequality(&node.range) {
+            for (tree, range) in collect_paths(marker.children()) {
+                if let Some(excluded) = range_inequality(&range) {
                     let current = path.len();
                     for version in excluded {
                         path.push(MarkerExpression::Version {
@@ -47,7 +91,7 @@ pub(crate) fn collect_dnf(
                     continue;
                 }
 
-                for bounds in node.range.iter() {
+                for bounds in range.iter() {
                     let current = path.len();
                     for specifier in VersionSpecifier::from_bounds(bounds) {
                         path.push(MarkerExpression::Version {
@@ -62,14 +106,8 @@ pub(crate) fn collect_dnf(
             }
         }
         MarkerTreeKind::String(marker) => {
-            let paths = collect_paths(marker.children());
-            for (tree, node) in paths {
-                if node.implied {
-                    collect_dnf(&tree, dnf, path);
-                    continue;
-                }
-
-                if let Some(excluded) = range_inequality(&node.range) {
+            for (tree, range) in collect_paths(marker.children()) {
+                if let Some(excluded) = range_inequality(&range) {
                     let current = path.len();
                     for value in excluded {
                         path.push(MarkerExpression::String {
@@ -84,7 +122,7 @@ pub(crate) fn collect_dnf(
                     continue;
                 }
 
-                for bounds in node.range.iter() {
+                for bounds in range.iter() {
                     let current = path.len();
                     for (operator, value) in MarkerOperator::from_bounds(bounds) {
                         path.push(MarkerExpression::String {
@@ -160,34 +198,16 @@ pub(crate) fn collect_dnf(
 
 fn collect_paths<'a, T>(
     map: impl Iterator<Item = (&'a Range<T>, MarkerTree)>,
-) -> IndexMap<MarkerTree, Node<T>, FxBuildHasher>
+) -> IndexMap<MarkerTree, Range<T>, FxBuildHasher>
 where
     T: Ord + Clone + 'a,
 {
-    let mut paths: IndexMap<_, Node<_>, FxBuildHasher> = IndexMap::default();
+    let mut paths: IndexMap<_, Range<_>, FxBuildHasher> = IndexMap::default();
     for (range, tree) in map {
         paths
             .entry(tree)
-            .and_modify(|node| node.range = node.range.union(range))
-            .or_insert_with(|| Node {
-                range: range.clone(),
-                implied: false,
-            });
-    }
-
-    if let Some(((tree1, node1), (tree2, node2))) = paths.iter_mut().collect_tuple() {
-        if !tree1.is_false() && !tree2.is_false() {
-            // If an expression is already implied we can omit it's complement in
-            // subsequent expressions.
-            //
-            // e.g. `foo or (not foo and bar)` is equivalent to `foo or bar` because
-            // `foo and bar => foo`.
-            if tree1.implies(tree2) {
-                node1.implied = true;
-            } else if tree2.implies(tree1) {
-                node2.implied = true;
-            }
-        }
+            .and_modify(|union| *union = union.union(range))
+            .or_insert_with(|| range.clone());
     }
 
     paths

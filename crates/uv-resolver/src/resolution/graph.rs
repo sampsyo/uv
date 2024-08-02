@@ -158,9 +158,9 @@ impl ResolutionGraph {
             .cloned();
 
         // Normalize any markers.
-        for edge in petgraph.edge_indices() {
-            if let Some(marker) = petgraph[edge].take() {
-                if let Some(ref requires_python) = requires_python {
+        if let Some(ref requires_python) = requires_python {
+            for edge in petgraph.edge_indices() {
+                if let Some(marker) = petgraph[edge].take() {
                     petgraph[edge] = Some(
                         marker.simplify_python_version(requires_python.bound().clone().into()),
                     );

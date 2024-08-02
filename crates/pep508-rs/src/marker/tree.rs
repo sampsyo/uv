@@ -265,6 +265,26 @@ impl MarkerOperator {
         }
     }
 
+    /// Negates this marker operator.
+    ///
+    /// If a negation doesn't exist, which is only the case for ~=, then this
+    /// returns `None`.
+    pub(crate) fn negate(self) -> Option<MarkerOperator> {
+        Some(match self {
+            Self::Equal => Self::NotEqual,
+            Self::NotEqual => Self::Equal,
+            Self::TildeEqual => return None,
+            Self::LessThan => Self::GreaterEqual,
+            Self::LessEqual => Self::GreaterThan,
+            Self::GreaterThan => Self::LessEqual,
+            Self::GreaterEqual => Self::LessThan,
+            Self::In => Self::NotIn,
+            Self::NotIn => Self::In,
+            Self::Contains => Self::NotContains,
+            Self::NotContains => Self::Contains,
+        })
+    }
+
     /// Returns the marker operator and value whose union represents the given range.
     pub fn from_bounds(
         bounds: (&Bound<String>, &Bound<String>),
@@ -449,6 +469,13 @@ impl ExtraOperator {
             _ => None,
         }
     }
+
+    pub(crate) fn negate(&self) -> ExtraOperator {
+        match *self {
+            ExtraOperator::Equal => ExtraOperator::NotEqual,
+            ExtraOperator::NotEqual => ExtraOperator::Equal,
+        }
+    }
 }
 
 impl Display for ExtraOperator {
@@ -486,6 +513,46 @@ impl MarkerExpression {
     /// Parse a [`MarkerExpression`] from a string.
     pub fn from_str(s: &str) -> Result<Option<Self>, Pep508Error> {
         MarkerExpression::parse_reporter(s, &mut TracingReporter)
+    }
+
+    pub(crate) fn negate(&self) -> Option<MarkerExpression> {
+        match *self {
+            MarkerExpression::Version {
+                ref key,
+                ref specifier,
+            } => {
+                let (op, version) = (specifier.operator(), specifier.version().clone());
+                let op = op.negate()?;
+                // OK because this can only fail with either local versions,
+                // which we avoid by construction, or if the op is ~=, which
+                // is never the result of negating an op.
+                let specifier =
+                    VersionSpecifier::from_version(op, version.without_local()).unwrap();
+                Some(MarkerExpression::Version {
+                    key: key.clone(),
+                    specifier,
+                })
+            }
+            MarkerExpression::String {
+                ref key,
+                ref operator,
+                ref value,
+            } => {
+                Some(MarkerExpression::String {
+                    key: key.clone(),
+                    // negating ~= doesn't make sense in this context
+                    operator: operator.negate()?,
+                    value: value.clone(),
+                })
+            }
+            MarkerExpression::Extra {
+                ref operator,
+                ref name,
+            } => Some(MarkerExpression::Extra {
+                operator: operator.negate(),
+                name: name.clone(),
+            }),
+        }
     }
 }
 
@@ -973,9 +1040,7 @@ impl MarkerTree {
 
     /// Returns a simplified DNF boolean expression for this marker tree.
     pub fn to_dnf(&self) -> Vec<Vec<MarkerExpression>> {
-        let mut dnf = Vec::new();
-        simplify::collect_dnf(self, &mut dnf, &mut Vec::new());
-        dnf
+        simplify::to_dnf(self)
     }
 
     /// Find a top level `extra == "..."` expression.
@@ -1326,6 +1391,31 @@ mod test {
                 or (os_name != 'Linux' and sys_platform == 'win32' and python_version == '3.7')
                 or (os_name != 'Linux' and sys_platform == 'win32' and python_version == '3.8')"),
             "(os_name == 'Linux' and sys_platform == 'win32') or (python_version == '3.7' and sys_platform == 'win32') or (python_version == '3.8' and sys_platform == 'win32')"
+        );
+
+        assert_eq!(
+            m("(implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32')"),
+            "(implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32')"
+        );
+
+        assert_eq!(
+            m("(sys_platform == 'darwin' or sys_platform == 'win32') and ((implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32'))"),
+            "(implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32')"
+        );
+
+        assert_eq!(
+            m("(sys_platform == 'darwin' or sys_platform == 'win32') and ((platform_version != '1' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32'))"),
+            "(os_name == 'nt' and platform_version != '1' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32')"
+        );
+
+        assert_eq!(
+            m("(os_name == 'nt' and sys_platform == 'win32') or (os_name != 'nt' and (sys_platform == 'win32' or sys_platform == 'win64'))"),
+            "sys_platform == 'win32' or (os_name != 'nt' and sys_platform == 'win64')"
+        );
+
+        assert_eq!(
+            m("(os_name == 'nt' and sys_platform == 'win32') or (os_name != 'nt' and platform_version == '1' and (sys_platform == 'win32' or sys_platform == 'win64'))"),
+            "(platform_version == '1' and sys_platform == 'win32') or (os_name != 'nt' and platform_version == '1' and sys_platform == 'win64') or (os_name == 'nt' and sys_platform == 'win32')"
         );
     }
 

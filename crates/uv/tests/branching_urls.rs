@@ -209,8 +209,8 @@ fn root_package_splits_transitive_too() -> Result<()> {
     version = 1
     requires-python = ">=3.11, <3.13"
     environment-markers = [
-        "python_version < '3.12'",
         "python_version >= '3.12'",
+        "python_version < '3.12'",
     ]
     exclude-newer = "2024-03-25 00:00:00 UTC"
 
@@ -383,8 +383,8 @@ fn root_package_splits_other_dependencies_too() -> Result<()> {
     version = 1
     requires-python = ">=3.11, <3.13"
     environment-markers = [
-        "python_version < '3.12'",
         "python_version >= '3.12'",
+        "python_version < '3.12'",
     ]
     exclude-newer = "2024-03-25 00:00:00 UTC"
 
@@ -528,8 +528,8 @@ fn branching_between_registry_and_direct_url() -> Result<()> {
     version = 1
     requires-python = ">=3.11, <3.13"
     environment-markers = [
-        "python_version < '3.12'",
         "python_version >= '3.12'",
+        "python_version < '3.12'",
     ]
     exclude-newer = "2024-03-25 00:00:00 UTC"
 
@@ -605,8 +605,8 @@ fn branching_urls_of_different_sources_disjoint() -> Result<()> {
     version = 1
     requires-python = ">=3.11, <3.13"
     environment-markers = [
-        "python_version < '3.12'",
         "python_version >= '3.12'",
+        "python_version < '3.12'",
     ]
     exclude-newer = "2024-03-25 00:00:00 UTC"
 
