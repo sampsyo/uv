@@ -926,6 +926,10 @@ fn lock_conditional_dependency_extra() -> Result<()> {
                 lock, @r###"
             version = 1
             requires-python = ">=3.7"
+            environment-markers = [
+                "python_version < '3.10'",
+                "python_version >= '3.10'",
+            ]
             exclude-newer = "2024-03-25 00:00:00 UTC"
 
             [[distribution]]
@@ -1078,7 +1082,7 @@ fn lock_conditional_dependency_extra() -> Result<()> {
 
             [distribution.optional-dependencies]
             socks = [
-                { name = "pysocks" },
+                { name = "pysocks", marker = "python_version < '3.10'" },
             ]
 
             [[distribution]]
