@@ -1179,6 +1179,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "etcetera"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "136d1b5283a1ab77bd9257427ffd09d8667ced0570b6f938942bc7568ed5b943"
+dependencies = [
+ "cfg-if",
+ "home",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "event-listener"
 version = "5.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4585,6 +4596,7 @@ dependencies = [
  "clap",
  "directories",
  "distribution-types",
+ "etcetera",
  "fs-err",
  "nanoid",
  "pypi-types",
@@ -5129,6 +5141,7 @@ name = "uv-state"
 version = "0.0.1"
 dependencies = [
  "directories",
+ "etcetera",
  "fs-err",
  "tempfile",
 ]
