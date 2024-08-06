@@ -668,6 +668,10 @@ impl MarkerTree {
         Some(MarkerTreeContents(self.clone()))
     }
 
+    pub fn try_to_string(&self) -> Option<String> {
+        self.contents().map(|contents| contents.to_string())
+    }
+
     /// Returns `true` if there is no environment in which both marker trees can both
     /// apply, i.e. the expression `first and second` is always false.
     pub fn is_disjoint(&self, tree: &MarkerTree) -> bool {
@@ -1010,8 +1014,8 @@ impl MarkerTree {
                 MarkerTreeKind::In(InMarkerTree {
                     key: key.clone(),
                     value,
-                    low: low.negate(self.0),
                     high: high.negate(self.0),
+                    low: low.negate(self.0),
                 })
             }
             Variable::Contains { key, value } => {
@@ -1021,8 +1025,8 @@ impl MarkerTree {
                 MarkerTreeKind::Contains(ContainsMarkerTree {
                     key: key.clone(),
                     value,
-                    low: low.negate(self.0),
                     high: high.negate(self.0),
+                    low: low.negate(self.0),
                 })
             }
             Variable::Extra(name) => {
@@ -1031,8 +1035,8 @@ impl MarkerTree {
                 };
                 MarkerTreeKind::Extra(ExtraMarkerTree {
                     name,
-                    low: low.negate(self.0),
                     high: high.negate(self.0),
+                    low: low.negate(self.0),
                 })
             }
         }
@@ -1199,8 +1203,8 @@ impl StringMarkerTree<'_> {
 pub struct InMarkerTree<'a> {
     key: MarkerValueString,
     value: &'a str,
-    low: NodeId,
     high: NodeId,
+    low: NodeId,
 }
 
 impl InMarkerTree<'_> {
@@ -1213,7 +1217,7 @@ impl InMarkerTree<'_> {
     }
 
     pub fn children(&self) -> impl Iterator<Item = (bool, MarkerTree)> {
-        [(false, MarkerTree(self.low)), (true, MarkerTree(self.high))].into_iter()
+        [(true, MarkerTree(self.high)), (false, MarkerTree(self.low))].into_iter()
     }
 
     pub fn edge(&self, value: bool) -> MarkerTree {
@@ -1229,8 +1233,8 @@ impl InMarkerTree<'_> {
 pub struct ContainsMarkerTree<'a> {
     key: MarkerValueString,
     value: &'a str,
-    low: NodeId,
     high: NodeId,
+    low: NodeId,
 }
 
 impl ContainsMarkerTree<'_> {
@@ -1243,7 +1247,7 @@ impl ContainsMarkerTree<'_> {
     }
 
     pub fn children(&self) -> impl Iterator<Item = (bool, MarkerTree)> {
-        [(false, MarkerTree(self.low)), (true, MarkerTree(self.high))].into_iter()
+        [(true, MarkerTree(self.high)), (false, MarkerTree(self.low))].into_iter()
     }
 
     pub fn edge(&self, value: bool) -> MarkerTree {
@@ -1258,8 +1262,8 @@ impl ContainsMarkerTree<'_> {
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ExtraMarkerTree<'a> {
     name: &'a ExtraName,
-    low: NodeId,
     high: NodeId,
+    low: NodeId,
 }
 
 impl ExtraMarkerTree<'_> {
@@ -1268,7 +1272,7 @@ impl ExtraMarkerTree<'_> {
     }
 
     pub fn children(&self) -> impl Iterator<Item = (bool, MarkerTree)> {
-        [(false, MarkerTree(self.low)), (true, MarkerTree(self.high))].into_iter()
+        [(true, MarkerTree(self.high)), (false, MarkerTree(self.low))].into_iter()
     }
 
     pub fn edge(&self, value: bool) -> MarkerTree {
@@ -1343,18 +1347,23 @@ impl Display for MarkerTreeContents {
 
 #[cfg(test)]
 mod test {
+    use std::ops::Bound;
     use std::str::FromStr;
 
     use insta::assert_snapshot;
-    use pep440_rs::VersionSpecifier;
+    use pep440_rs::Version;
+    use pubgrub::Range;
     use uv_normalize::ExtraName;
 
-    use crate::marker::range::PubGrubSpecifier;
     use crate::marker::{MarkerEnvironment, MarkerEnvironmentBuilder};
     use crate::{MarkerExpression, MarkerOperator, MarkerTree, MarkerValueString};
 
     fn parse_err(input: &str) -> String {
         MarkerTree::from_str(input).unwrap_err().to_string()
+    }
+
+    fn m(s: &str) -> MarkerTree {
+        s.parse().unwrap()
     }
 
     fn env37() -> MarkerEnvironment {
@@ -1376,50 +1385,57 @@ mod test {
 
     #[test]
     fn test_marker_simplification() {
-        let m = |marker_string: &str| -> String {
-            marker_string
-                .parse::<MarkerTree>()
-                .unwrap()
-                .contents()
-                .unwrap()
-                .to_string()
-        };
-
-        assert_eq!(m("python_version > '3.7'"), "python_version > '3.7'");
         assert_eq!(
-            m("(python_version <= '3.7' and os_name == 'Linux') or python_version > '3.7'"),
+            m("python_version > '3.7'").try_to_string().unwrap(),
+            "python_version > '3.7'"
+        );
+        assert_eq!(
+            m("(python_version <= '3.7' and os_name == 'Linux') or python_version > '3.7'")
+                .try_to_string()
+                .unwrap(),
             "os_name == 'Linux' or python_version > '3.7'"
         );
 
         assert_eq!(
             m("(os_name == 'Linux' and sys_platform == 'win32')
                 or (os_name != 'Linux' and sys_platform == 'win32' and python_version == '3.7')
-                or (os_name != 'Linux' and sys_platform == 'win32' and python_version == '3.8')"),
+                or (os_name != 'Linux' and sys_platform == 'win32' and python_version == '3.8')"
+            ).try_to_string().unwrap(),
             "(os_name == 'Linux' and sys_platform == 'win32') or (python_version == '3.7' and sys_platform == 'win32') or (python_version == '3.8' and sys_platform == 'win32')"
         );
 
         assert_eq!(
-            m("(implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32')"),
+            m("(implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32')")
+                .try_to_string()
+                .unwrap(),
             "(implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32')"
         );
 
         assert_eq!(
-            m("(sys_platform == 'darwin' or sys_platform == 'win32') and ((implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32'))"),
+            m("(sys_platform == 'darwin' or sys_platform == 'win32') and ((implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32'))")
+                .try_to_string()
+                .unwrap(),
             "(implementation_name != 'pypy' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32')"
         );
 
         assert_eq!(
-            m("(sys_platform == 'darwin' or sys_platform == 'win32') and ((platform_version != '1' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32'))"),
+            m("(sys_platform == 'darwin' or sys_platform == 'win32') and ((platform_version != '1' and os_name == 'nt' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32'))")
+                .try_to_string()
+                .unwrap(),
             "(os_name == 'nt' and platform_version != '1' and sys_platform == 'darwin') or (os_name == 'nt' and sys_platform == 'win32')"
         );
 
         assert_eq!(
-            m("(os_name == 'nt' and sys_platform == 'win32') or (os_name != 'nt' and (sys_platform == 'win32' or sys_platform == 'win64'))"),
+            m("(os_name == 'nt' and sys_platform == 'win32') or (os_name != 'nt' and (sys_platform == 'win32' or sys_platform == 'win64'))")
+                .try_to_string()
+                .unwrap(),
             "sys_platform == 'win32' or (os_name != 'nt' and sys_platform == 'win64')"
         );
 
         assert_eq!(
-            m("(os_name == 'nt' and sys_platform == 'win32') or (os_name != 'nt' and platform_version == '1' and (sys_platform == 'win32' or sys_platform == 'win64'))"),
+            m("(os_name == 'nt' and sys_platform == 'win32') or (os_name != 'nt' and platform_version == '1' and (sys_platform == 'win32' or sys_platform == 'win64'))")
+                .try_to_string()
+                .unwrap(),
             "(platform_version == '1' and sys_platform == 'win32') or (os_name != 'nt' and platform_version == '1' and sys_platform == 'win64') or (os_name == 'nt' and sys_platform == 'win32')"
         );
     }
@@ -1452,19 +1468,14 @@ mod test {
                 r#"python_version == "2.7" and (sys_platform == "win32" or sys_platform == "linux")"#,
             ),
         ];
+
         for (a, b) in values {
-            assert_eq!(
-                MarkerTree::from_str(a).unwrap(),
-                MarkerTree::from_str(b).unwrap(),
-                "{a} {b}"
-            );
+            assert_eq!(m(a), m(b), "{a} {b}");
         }
     }
 
     #[test]
-    fn simplify() {
-        let m = |marker_string: &str| -> MarkerTree { marker_string.parse().unwrap() };
-
+    fn simplify_python_versions() {
         assert_eq!(
             m("(extra == 'foo' and sys_platform == 'win32') or extra == 'foo'")
                 .simplify_extras(&["foo".parse().unwrap()]),
@@ -1474,16 +1485,14 @@ mod test {
         assert_eq!(
             m("(python_version <= '3.11' and sys_platform == 'win32') or python_version > '3.11'")
                 .simplify_python_versions(
-                    PubGrubSpecifier::from_pep440_specifier(
-                        &VersionSpecifier::greater_than_version("3.12".parse().unwrap())
-                    )
-                    .unwrap()
-                    .into(),
-                    PubGrubSpecifier::from_pep440_specifier(
-                        &VersionSpecifier::greater_than_version("3.12.1".parse().unwrap())
-                    )
-                    .unwrap()
-                    .into()
+                    Range::from_range_bounds((
+                        Bound::Excluded(Version::new([3, 12])),
+                        Bound::Unbounded,
+                    )),
+                    Range::from_range_bounds((
+                        Bound::Excluded(Version::new([3, 12])),
+                        Bound::Unbounded,
+                    )),
                 ),
             MarkerTree::TRUE
         );
@@ -1491,47 +1500,54 @@ mod test {
         assert_eq!(
             m("python_version < '3.10'")
                 .simplify_python_versions(
-                    PubGrubSpecifier::from_pep440_specifier(
-                        &VersionSpecifier::greater_than_equal_version("3.7".parse().unwrap())
-                    )
-                    .unwrap()
-                    .into(),
-                    PubGrubSpecifier::from_pep440_specifier(
-                        &VersionSpecifier::greater_than_equal_version("3.7".parse().unwrap())
-                    )
-                    .unwrap()
-                    .into()
+                    Range::from_range_bounds((
+                        Bound::Excluded(Version::new([3, 7])),
+                        Bound::Unbounded,
+                    )),
+                    Range::from_range_bounds((
+                        Bound::Excluded(Version::new([3, 7])),
+                        Bound::Unbounded,
+                    )),
                 )
-                .contents()
-                .unwrap()
-                .to_string(),
+                .try_to_string()
+                .unwrap(),
             "python_version < '3.10'"
         );
 
         assert_eq!(
-            "python_version <= '3.12'"
-                .parse::<MarkerTree>()
-                .unwrap()
-                .simplify_python_versions(
-                    PubGrubSpecifier::from_pep440_specifier(
-                        &VersionSpecifier::greater_than_version("3.12".parse().unwrap())
-                    )
-                    .unwrap()
-                    .into(),
-                    PubGrubSpecifier::from_pep440_specifier(
-                        &VersionSpecifier::greater_than_version("3.12.1".parse().unwrap())
-                    )
-                    .unwrap()
-                    .into()
-                ),
+            m("python_version <= '3.12'").simplify_python_versions(
+                Range::from_range_bounds((
+                    Bound::Excluded(Version::new([3, 12])),
+                    Bound::Unbounded,
+                )),
+                Range::from_range_bounds((
+                    Bound::Excluded(Version::new([3, 12])),
+                    Bound::Unbounded,
+                )),
+            ),
             MarkerTree::FALSE
+        );
+
+        assert_eq!(
+            m("python_full_version <= '3.12.1'")
+                .simplify_python_versions(
+                    Range::from_range_bounds((
+                        Bound::Excluded(Version::new([3, 12])),
+                        Bound::Unbounded,
+                    )),
+                    Range::from_range_bounds((
+                        Bound::Excluded(Version::new([3, 12])),
+                        Bound::Unbounded,
+                    )),
+                )
+                .try_to_string()
+                .unwrap(),
+            "python_full_version <= '3.12.1'"
         );
     }
 
     #[test]
-    fn no_pre_release() {
-        let m = |marker_string: &str| -> MarkerTree { marker_string.parse().unwrap() };
-
+    fn release_only() {
         assert!(m("python_full_version > '3.10' or python_full_version <= '3.10'").is_true());
         assert!(
             m("python_full_version > '3.10' or python_full_version <= '3.10'")
@@ -1543,8 +1559,6 @@ mod test {
 
     #[test]
     fn test_marker_negation() {
-        let m = |marker_string: &str| -> MarkerTree { marker_string.parse().unwrap() };
-
         assert_eq!(
             m("python_version > '3.6'").not(),
             m("python_version <= '3.6'")
@@ -1601,14 +1615,12 @@ mod test {
             m("sys_platform != 'linux'")
         );
 
-        // // ~= is nonsense on string markers. Evaluation always returns false
-        // // in this case, so technically negation would be an expression that
-        // // always returns true. But, as we do with "arbitrary" markers, we
-        // // don't let the negation of nonsense become sensible.
-        // assert_eq!(neg("sys_platform ~= 'linux'"), "sys_platform ~= 'linux'");
+        // ~= is nonsense on string markers, so the markers is ignored and always
+        // evaluates to true. Thus the negation always returns false.
+        assert_eq!(m("sys_platform ~= 'linux'").not(), MarkerTree::FALSE);
 
-        // // As above, arbitrary exprs remain arbitrary.
-        // assert_eq!(neg("'foo' == 'bar'"), "'foo' != 'bar'");
+        // As above, arbitrary exprs remain arbitrary.
+        assert_eq!(m("'foo' == 'bar'").not(), MarkerTree::FALSE);
 
         // Conjunctions
         assert_eq!(
@@ -1920,412 +1932,388 @@ mod test {
             MarkerTree::from_str(r#"os_name == "nt" or python_version == "3.7""#).unwrap();
         assert_eq!(simplified, expected);
     }
-}
 
-// TODO
-// #[cfg(test)]
-// mod tests {
-//     use pep508_rs::TracingReporter;
-//
-//     use super::*;
-//
-//     #[test]
-//     fn simplify() {
-//         assert_marker_equal(
-//             "python_version == '3.9' or python_version == '3.9'",
-//             "python_version == '3.9'",
-//         );
-//
-//         assert_marker_equal(
-//             "python_version < '3.17' or python_version < '3.18'",
-//             "python_version < '3.18'",
-//         );
-//
-//         assert_marker_equal(
-//             "python_version > '3.17' or python_version > '3.18' or python_version > '3.12'",
-//             "python_version > '3.12'",
-//         );
-//
-//         // a quirk of how pubgrub works, but this is considered part of normalization
-//         assert_marker_equal(
-//             "python_version > '3.17.post4' or python_version > '3.18.post4'",
-//             "python_version > '3.17'",
-//         );
-//
-//         assert_marker_equal(
-//             "python_version < '3.17' and python_version < '3.18'",
-//             "python_version < '3.17'",
-//         );
-//
-//         assert_marker_equal(
-//             "python_version <= '3.18' and python_version == '3.18'",
-//             "python_version == '3.18'",
-//         );
-//
-//         assert_marker_equal(
-//             "python_version <= '3.18' or python_version == '3.18'",
-//             "python_version <= '3.18'",
-//         );
-//
-//         assert_marker_equal(
-//             "python_version <= '3.15' or (python_version <= '3.17' and python_version < '3.16')",
-//             "python_version < '3.16'",
-//         );
-//
-//         assert_marker_equal(
-//             "(python_version > '3.17' or python_version > '3.16') and python_version > '3.15'",
-//             "python_version > '3.16'",
-//         );
-//
-//         assert_marker_equal(
-//             "(python_version > '3.17' or python_version > '3.16') and python_version > '3.15' and implementation_version == '1'",
-//             "implementation_version == '1' and python_version > '3.16'",
-//         );
-//
-//         assert_marker_equal(
-//             "('3.17' < python_version or '3.16' < python_version) and '3.15' < python_version and implementation_version == '1'",
-//             "implementation_version == '1' and python_version > '3.16'",
-//         );
-//
-//         assert_marker_equal("extra == 'a' or extra == 'a'", "extra == 'a'");
-//         assert_marker_equal(
-//             "extra == 'a' and extra == 'a' or extra == 'b'",
-//             "extra == 'a' or extra == 'b'",
-//         );
-//
-//         // bogus expressions are retained but still normalized
-//         assert_marker_equal(
-//             "python_version < '3.17' and '3.18' == python_version",
-//             "python_version == '3.18' and python_version < '3.17'",
-//         );
-//
-//         // flatten nested expressions
-//         assert_marker_equal(
-//             "((extra == 'a' and extra == 'b') and extra == 'c') and extra == 'b'",
-//             "extra == 'a' and extra == 'b' and extra == 'c'",
-//         );
-//
-//         assert_marker_equal(
-//             "((extra == 'a' or extra == 'b') or extra == 'c') or extra == 'b'",
-//             "extra == 'a' or extra == 'b' or extra == 'c'",
-//         );
-//
-//         // complex expressions
-//         assert_marker_equal(
-//             "extra == 'a' or (extra == 'a' and extra == 'b')",
-//             "extra == 'a'",
-//         );
-//
-//         assert_marker_equal(
-//             "extra == 'a' and (extra == 'a' or extra == 'b')",
-//             "extra == 'a'",
-//         );
-//
-//         assert_marker_equal(
-//             "(extra == 'a' and (extra == 'a' or extra == 'b')) or extra == 'd'",
-//             "extra == 'a' or extra == 'd'",
-//         );
-//
-//         assert_marker_equal(
-//             "((extra == 'a' and extra == 'b') or extra == 'c') or extra == 'b'",
-//             "extra == 'b' or extra == 'c'",
-//         );
-//
-//         assert_marker_equal(
-//             "((extra == 'a' or extra == 'b') and extra == 'c') and extra == 'b'",
-//             "extra == 'b' and extra == 'c'",
-//         );
-//
-//         assert_marker_equal(
-//             "((extra == 'a' or extra == 'b') and extra == 'c') or extra == 'b'",
-//             "extra == 'b' or (extra == 'a' and extra == 'c')",
-//         );
-//
-//         // post-normalization filtering
-//         assert_marker_equal(
-//             "(python_version < '3.1' or python_version < '3.2') and (python_version < '3.2' or python_version == '3.3')",
-//             "python_version < '3.2'",
-//         );
-//
-//         // normalize out redundant ranges
-//         assert_normalizes_out("python_version < '3.12.0rc1' or python_version >= '3.12.0rc1'");
-//
-//         assert_normalizes_out(
-//             "extra == 'a' or (python_version < '3.12.0rc1' or python_version >= '3.12.0rc1')",
-//         );
-//
-//         assert_normalizes_to(
-//             "extra == 'a' and (python_version < '3.12.0rc1' or python_version >= '3.12.0rc1')",
-//             "extra == 'a'",
-//         );
-//
-//         // normalize `!=` operators
-//         assert_normalizes_out("python_version != '3.10' or python_version < '3.12'");
-//
-//         assert_normalizes_to(
-//             "python_version != '3.10' or python_version > '3.12'",
-//             "python_version < '3.10' or python_version > '3.10'",
-//         );
-//
-//         assert_normalizes_to(
-//             "python_version != '3.8' and python_version < '3.10'",
-//             "python_version < '3.10' and (python_version < '3.8' or python_version > '3.8')",
-//         );
-//
-//         assert_normalizes_to(
-//             "python_version != '3.8' and python_version != '3.9'",
-//             "(python_version < '3.8' or python_version > '3.8') and (python_version < '3.9' or python_version > '3.9')",
-//         );
-//
-//         // normalize out redundant expressions
-//         assert_normalizes_out("sys_platform == 'win32' or sys_platform != 'win32'");
-//
-//         assert_normalizes_out("'win32' == sys_platform or sys_platform != 'win32'");
-//
-//         assert_normalizes_out(
-//             "sys_platform == 'win32' or sys_platform == 'win32' or sys_platform != 'win32'",
-//         );
-//
-//         assert_normalizes_to(
-//             "sys_platform == 'win32' and sys_platform != 'win32'",
-//             "sys_platform == 'win32' and sys_platform != 'win32'",
-//         );
-//     }
-//
-//     #[test]
-//     fn requires_python() {
-//         assert_normalizes_out("python_version >= '3.8'");
-//         assert_normalizes_out("python_version >= '3.8' or sys_platform == 'win32'");
-//
-//         assert_normalizes_to(
-//             "python_version >= '3.8' and sys_platform == 'win32'",
-//             "sys_platform == 'win32'",
-//         );
-//
-//         assert_normalizes_to("python_version == '3.8'", "python_version == '3.8'");
-//
-//         assert_normalizes_to("python_version <= '3.10'", "python_version <= '3.10'");
-//     }
-//
-//     #[test]
-//     fn extra_disjointness() {
-//         assert!(!is_disjoint("extra == 'a'", "python_version == '1'"));
-//
-//         assert!(!is_disjoint("extra == 'a'", "extra == 'a'"));
-//         assert!(!is_disjoint("extra == 'a'", "extra == 'b'"));
-//         assert!(!is_disjoint("extra == 'b'", "extra == 'a'"));
-//         assert!(!is_disjoint("extra == 'b'", "extra != 'a'"));
-//         assert!(!is_disjoint("extra != 'b'", "extra == 'a'"));
-//         assert!(is_disjoint("extra != 'b'", "extra == 'b'"));
-//         assert!(is_disjoint("extra == 'b'", "extra != 'b'"));
-//     }
-//
-//     #[test]
-//     fn arbitrary_disjointness() {
-//         assert!(is_disjoint(
-//             "python_version == 'Linux'",
-//             "python_version == '3.7.1'"
-//         ));
-//     }
-//
-//     #[test]
-//     fn version_disjointness() {
-//         assert!(!is_disjoint(
-//             "os_name == 'Linux'",
-//             "python_version == '3.7.1'"
-//         ));
-//
-//         test_version_bounds_disjointness("python_version");
-//
-//         assert!(!is_disjoint(
-//             "python_version == '3.7.*'",
-//             "python_version == '3.7.1'"
-//         ));
-//     }
-//
-//     #[test]
-//     fn string_disjointness() {
-//         assert!(!is_disjoint(
-//             "os_name == 'Linux'",
-//             "platform_version == '3.7.1'"
-//         ));
-//         assert!(!is_disjoint(
-//             "implementation_version == '3.7.0'",
-//             "python_version == '3.7.1'"
-//         ));
-//
-//         // basic version bounds checking should still work with lexicographical comparisons
-//         test_version_bounds_disjointness("platform_version");
-//
-//         assert!(is_disjoint("os_name == 'Linux'", "os_name == 'OSX'"));
-//         assert!(is_disjoint("os_name <= 'Linux'", "os_name == 'OSX'"));
-//
-//         assert!(!is_disjoint(
-//             "os_name in 'OSXLinuxWindows'",
-//             "os_name == 'OSX'"
-//         ));
-//         assert!(!is_disjoint("'OSX' in os_name", "'Linux' in os_name"));
-//
-//         // complicated `in` intersections are not supported
-//         assert!(!is_disjoint("os_name in 'OSX'", "os_name in 'Linux'"));
-//         assert!(!is_disjoint(
-//             "os_name in 'OSXLinux'",
-//             "os_name == 'Windows'"
-//         ));
-//
-//         assert!(is_disjoint(
-//             "os_name in 'Windows'",
-//             "os_name not in 'Windows'"
-//         ));
-//         assert!(is_disjoint(
-//             "'Windows' in os_name",
-//             "'Windows' not in os_name"
-//         ));
-//
-//         assert!(!is_disjoint("'Windows' in os_name", "'Windows' in os_name"));
-//         assert!(!is_disjoint("'Linux' in os_name", "os_name not in 'Linux'"));
-//         assert!(!is_disjoint("'Linux' not in os_name", "os_name in 'Linux'"));
-//     }
-//
-//     #[test]
-//     fn combined_disjointness() {
-//         assert!(!is_disjoint(
-//             "os_name == 'a' and platform_version == '1'",
-//             "os_name == 'a'"
-//         ));
-//         assert!(!is_disjoint(
-//             "os_name == 'a' or platform_version == '1'",
-//             "os_name == 'a'"
-//         ));
-//
-//         assert!(is_disjoint(
-//             "os_name == 'a' and platform_version == '1'",
-//             "os_name == 'a' and platform_version == '2'"
-//         ));
-//         assert!(is_disjoint(
-//             "os_name == 'a' and platform_version == '1'",
-//             "'2' == platform_version and os_name == 'a'"
-//         ));
-//         assert!(!is_disjoint(
-//             "os_name == 'a' or platform_version == '1'",
-//             "os_name == 'a' or platform_version == '2'"
-//         ));
-//
-//         assert!(is_disjoint(
-//             "sys_platform == 'darwin' and implementation_name == 'pypy'",
-//             "sys_platform == 'bar' or implementation_name == 'foo'",
-//         ));
-//         assert!(is_disjoint(
-//             "sys_platform == 'bar' or implementation_name == 'foo'",
-//             "sys_platform == 'darwin' and implementation_name == 'pypy'",
-//         ));
-//     }
-//
-//     #[test]
-//     fn is_definitively_empty_set() {
-//         assert!(is_empty("'wat' == 'wat'"));
-//         assert!(is_empty(
-//             "python_version < '3.10' and python_version >= '3.10'"
-//         ));
-//         assert!(is_empty(
-//             "(python_version < '3.10' and python_version >= '3.10') \
-//              or (python_version < '3.9' and python_version >= '3.9')",
-//         ));
-//
-//         assert!(!is_empty("python_version < '3.10'"));
-//         assert!(!is_empty("python_version < '0'"));
-//         assert!(!is_empty(
-//             "python_version < '3.10' and python_version >= '3.9'"
-//         ));
-//         assert!(!is_empty(
-//             "python_version < '3.10' or python_version >= '3.11'"
-//         ));
-//     }
-//
-//     fn test_version_bounds_disjointness(version: &str) {
-//         assert!(!is_disjoint(
-//             format!("{version} > '2.7.0'"),
-//             format!("{version} == '3.6.0'")
-//         ));
-//         assert!(!is_disjoint(
-//             format!("{version} >= '3.7.0'"),
-//             format!("{version} == '3.7.1'")
-//         ));
-//         assert!(!is_disjoint(
-//             format!("{version} >= '3.7.0'"),
-//             format!("'3.7.1' == {version}")
-//         ));
-//
-//         assert!(is_disjoint(
-//             format!("{version} >= '3.7.1'"),
-//             format!("{version} == '3.7.0'")
-//         ));
-//         assert!(is_disjoint(
-//             format!("'3.7.1' <= {version}"),
-//             format!("{version} == '3.7.0'")
-//         ));
-//
-//         assert!(is_disjoint(
-//             format!("{version} < '3.7.0'"),
-//             format!("{version} == '3.7.0'")
-//         ));
-//         assert!(is_disjoint(
-//             format!("'3.7.0' > {version}"),
-//             format!("{version} == '3.7.0'")
-//         ));
-//         assert!(is_disjoint(
-//             format!("{version} < '3.7.0'"),
-//             format!("{version} == '3.7.1'")
-//         ));
-//
-//         assert!(is_disjoint(
-//             format!("{version} == '3.7.0'"),
-//             format!("{version} == '3.7.1'")
-//         ));
-//         assert!(is_disjoint(
-//             format!("{version} == '3.7.0'"),
-//             format!("{version} != '3.7.0'")
-//         ));
-//     }
-//
-//     fn is_empty(tree: &str) -> bool {
-//         let tree = MarkerTree::parse_reporter(tree, &mut TracingReporter).unwrap();
-//         super::is_definitively_empty_set(&tree)
-//     }
-//
-//     fn is_disjoint(one: impl AsRef<str>, two: impl AsRef<str>) -> bool {
-//         let one = MarkerTree::parse_reporter(one.as_ref(), &mut TracingReporter).unwrap();
-//         let two = MarkerTree::parse_reporter(two.as_ref(), &mut TracingReporter).unwrap();
-//         super::is_disjoint(&one, &two) && super::is_disjoint(&two, &one)
-//     }
-//
-//     fn assert_marker_equal(one: impl AsRef<str>, two: impl AsRef<str>) {
-//         let bound = RequiresPythonBound::new(Included(Version::new([3, 8])));
-//         let tree1 = MarkerTree::parse_reporter(one.as_ref(), &mut TracingReporter).unwrap();
-//         let tree1 = normalize(tree1, Some(&bound)).unwrap();
-//         let tree2 = MarkerTree::parse_reporter(two.as_ref(), &mut TracingReporter).unwrap();
-//         assert_eq!(
-//             tree1.to_string(),
-//             tree2.to_string(),
-//             "failed to normalize {}",
-//             one.as_ref()
-//         );
-//     }
-//
-//     fn assert_normalizes_to(before: impl AsRef<str>, after: impl AsRef<str>) {
-//         let bound = RequiresPythonBound::new(Included(Version::new([3, 8])));
-//         let normalized = MarkerTree::parse_reporter(before.as_ref(), &mut TracingReporter)
-//             .unwrap()
-//             .clone();
-//         let normalized = normalize(normalized, Some(&bound)).unwrap();
-//         assert_eq!(normalized.to_string(), after.as_ref());
-//     }
-//
-//     fn assert_normalizes_out(before: impl AsRef<str>) {
-//         let bound = RequiresPythonBound::new(Included(Version::new([3, 8])));
-//         let normalized = MarkerTree::parse_reporter(before.as_ref(), &mut TracingReporter)
-//             .unwrap()
-//             .clone();
-//         assert!(normalize(normalized, Some(&bound)).is_none());
-//     }
-// }
+    #[test]
+    fn simplify() {
+        assert_simplifies(
+            "python_version == '3.9' or python_version == '3.9'",
+            "python_version == '3.9'",
+        );
+
+        assert_simplifies(
+            "python_version < '3.17' or python_version < '3.18'",
+            "python_version < '3.18'",
+        );
+
+        assert_simplifies(
+            "python_version > '3.17' or python_version > '3.18' or python_version > '3.12'",
+            "python_version > '3.12'",
+        );
+
+        // a quirk of how pubgrub works, but this is considered part of normalization
+        assert_simplifies(
+            "python_version > '3.17.post4' or python_version > '3.18.post4'",
+            "python_version > '3.17'",
+        );
+
+        assert_simplifies(
+            "python_version < '3.17' and python_version < '3.18'",
+            "python_version < '3.17'",
+        );
+
+        assert_simplifies(
+            "python_version <= '3.18' and python_version == '3.18'",
+            "python_version == '3.18'",
+        );
+
+        assert_simplifies(
+            "python_version <= '3.18' or python_version == '3.18'",
+            "python_version <= '3.18'",
+        );
+
+        assert_simplifies(
+            "python_version <= '3.15' or (python_version <= '3.17' and python_version < '3.16')",
+            "python_version < '3.16'",
+        );
+
+        assert_simplifies(
+            "(python_version > '3.17' or python_version > '3.16') and python_version > '3.15'",
+            "python_version > '3.16'",
+        );
+
+        assert_simplifies(
+             "(python_version > '3.17' or python_version > '3.16') and python_version > '3.15' and implementation_version == '1'",
+             "implementation_version == '1' and python_version > '3.16'",
+         );
+
+        assert_simplifies(
+             "('3.17' < python_version or '3.16' < python_version) and '3.15' < python_version and implementation_version == '1'",
+             "implementation_version == '1' and python_version > '3.16'",
+         );
+
+        assert_simplifies("extra == 'a' or extra == 'a'", "extra == 'a'");
+        assert_simplifies(
+            "extra == 'a' and extra == 'a' or extra == 'b'",
+            "extra == 'a' or extra == 'b'",
+        );
+
+        assert!(m("python_version < '3.17' and '3.18' == python_version").is_false());
+
+        // flatten nested expressions
+        assert_simplifies(
+            "((extra == 'a' and extra == 'b') and extra == 'c') and extra == 'b'",
+            "extra == 'a' and extra == 'b' and extra == 'c'",
+        );
+
+        assert_simplifies(
+            "((extra == 'a' or extra == 'b') or extra == 'c') or extra == 'b'",
+            "extra == 'a' or extra == 'b' or extra == 'c'",
+        );
+
+        // complex expressions
+        assert_simplifies(
+            "extra == 'a' or (extra == 'a' and extra == 'b')",
+            "extra == 'a'",
+        );
+
+        assert_simplifies(
+            "extra == 'a' and (extra == 'a' or extra == 'b')",
+            "extra == 'a'",
+        );
+
+        assert_simplifies(
+            "(extra == 'a' and (extra == 'a' or extra == 'b')) or extra == 'd'",
+            "extra == 'a' or extra == 'd'",
+        );
+
+        assert_simplifies(
+            "((extra == 'a' and extra == 'b') or extra == 'c') or extra == 'b'",
+            "extra == 'b' or extra == 'c'",
+        );
+
+        assert_simplifies(
+            "((extra == 'a' or extra == 'b') and extra == 'c') and extra == 'b'",
+            "extra == 'b' and extra == 'c'",
+        );
+
+        assert_simplifies(
+            "((extra == 'a' or extra == 'b') and extra == 'c') or extra == 'b'",
+            "extra == 'b' or (extra == 'a' and extra == 'c')",
+        );
+
+        // post-normalization filtering
+        assert_simplifies(
+             "(python_version < '3.1' or python_version < '3.2') and (python_version < '3.2' or python_version == '3.3')",
+             "python_version < '3.2'",
+         );
+
+        // normalize out redundant ranges
+        assert_true("python_version < '3.12.0rc1' or python_version >= '3.12.0rc1'");
+
+        assert_true(
+            "extra == 'a' or (python_version < '3.12.0rc1' or python_version >= '3.12.0rc1')",
+        );
+
+        assert_simplifies(
+            "extra == 'a' and (python_version < '3.12.0rc1' or python_version >= '3.12.0rc1')",
+            "extra == 'a'",
+        );
+
+        // normalize `!=` operators
+        assert_true("python_version != '3.10' or python_version < '3.12'");
+
+        assert_simplifies(
+            "python_version != '3.10' or python_version > '3.12'",
+            "python_version != '3.10'",
+        );
+
+        assert_simplifies(
+            "python_version != '3.8' and python_version < '3.10'",
+            "python_version < '3.8' or (python_version > '3.8' and python_version < '3.10')",
+        );
+
+        assert_simplifies(
+            "python_version != '3.8' and python_version != '3.9'",
+            "python_version != '3.8' and python_version != '3.9'",
+        );
+
+        // normalize out redundant expressions
+        assert_true("sys_platform == 'win32' or sys_platform != 'win32'");
+
+        assert_true("'win32' == sys_platform or sys_platform != 'win32'");
+
+        assert_true(
+            "sys_platform == 'win32' or sys_platform == 'win32' or sys_platform != 'win32'",
+        );
+
+        assert!(m("sys_platform == 'win32' and sys_platform != 'win32'").is_false());
+    }
+
+    #[test]
+    fn requires_python() {
+        fn simplified(marker: &str) -> MarkerTree {
+            m(marker).simplify_python_versions(
+                Range::from_range_bounds((Bound::Included(Version::new([3, 8])), Bound::Unbounded)),
+                Range::from_range_bounds((Bound::Included(Version::new([3, 8])), Bound::Unbounded)),
+            )
+        }
+
+        assert_eq!(simplified("python_version >= '3.8'"), MarkerTree::TRUE);
+        assert_eq!(
+            simplified("python_version >= '3.8' or sys_platform == 'win32'"),
+            MarkerTree::TRUE
+        );
+
+        assert_eq!(
+            simplified("python_version >= '3.8' and sys_platform == 'win32'"),
+            m("sys_platform == 'win32'"),
+        );
+
+        assert_eq!(
+            simplified("python_version == '3.8'")
+                .try_to_string()
+                .unwrap(),
+            "python_version == '3.8'"
+        );
+
+        assert_eq!(
+            simplified("python_version <= '3.10'")
+                .try_to_string()
+                .unwrap(),
+            "python_version <= '3.10'"
+        );
+    }
+
+    #[test]
+    fn extra_disjointness() {
+        assert!(!is_disjoint("extra == 'a'", "python_version == '1'"));
+
+        assert!(!is_disjoint("extra == 'a'", "extra == 'a'"));
+        assert!(!is_disjoint("extra == 'a'", "extra == 'b'"));
+        assert!(!is_disjoint("extra == 'b'", "extra == 'a'"));
+        assert!(!is_disjoint("extra == 'b'", "extra != 'a'"));
+        assert!(!is_disjoint("extra != 'b'", "extra == 'a'"));
+        assert!(is_disjoint("extra != 'b'", "extra == 'b'"));
+        assert!(is_disjoint("extra == 'b'", "extra != 'b'"));
+    }
+
+    #[test]
+    fn arbitrary_disjointness() {
+        // `python_version == 'Linux'` is nonsense and ignored, thus the first marker
+        // is always `true` and not disjoint.
+        assert!(!is_disjoint(
+            "python_version == 'Linux'",
+            "python_version == '3.7.1'"
+        ));
+    }
+
+    #[test]
+    fn version_disjointness() {
+        assert!(!is_disjoint(
+            "os_name == 'Linux'",
+            "python_version == '3.7.1'"
+        ));
+
+        test_version_bounds_disjointness("python_version");
+
+        assert!(!is_disjoint(
+            "python_version == '3.7.*'",
+            "python_version == '3.7.1'"
+        ));
+    }
+
+    #[test]
+    fn string_disjointness() {
+        assert!(!is_disjoint(
+            "os_name == 'Linux'",
+            "platform_version == '3.7.1'"
+        ));
+        assert!(!is_disjoint(
+            "implementation_version == '3.7.0'",
+            "python_version == '3.7.1'"
+        ));
+
+        // basic version bounds checking should still work with lexicographical comparisons
+        test_version_bounds_disjointness("platform_version");
+
+        assert!(is_disjoint("os_name == 'Linux'", "os_name == 'OSX'"));
+        assert!(is_disjoint("os_name <= 'Linux'", "os_name == 'OSX'"));
+
+        assert!(!is_disjoint(
+            "os_name in 'OSXLinuxWindows'",
+            "os_name == 'OSX'"
+        ));
+        assert!(!is_disjoint("'OSX' in os_name", "'Linux' in os_name"));
+
+        // complicated `in` intersections are not supported
+        assert!(!is_disjoint("os_name in 'OSX'", "os_name in 'Linux'"));
+        assert!(!is_disjoint(
+            "os_name in 'OSXLinux'",
+            "os_name == 'Windows'"
+        ));
+
+        assert!(is_disjoint(
+            "os_name in 'Windows'",
+            "os_name not in 'Windows'"
+        ));
+        assert!(is_disjoint(
+            "'Windows' in os_name",
+            "'Windows' not in os_name"
+        ));
+
+        assert!(!is_disjoint("'Windows' in os_name", "'Windows' in os_name"));
+        assert!(!is_disjoint("'Linux' in os_name", "os_name not in 'Linux'"));
+        assert!(!is_disjoint("'Linux' not in os_name", "os_name in 'Linux'"));
+    }
+
+    #[test]
+    fn combined_disjointness() {
+        assert!(!is_disjoint(
+            "os_name == 'a' and platform_version == '1'",
+            "os_name == 'a'"
+        ));
+        assert!(!is_disjoint(
+            "os_name == 'a' or platform_version == '1'",
+            "os_name == 'a'"
+        ));
+
+        assert!(is_disjoint(
+            "os_name == 'a' and platform_version == '1'",
+            "os_name == 'a' and platform_version == '2'"
+        ));
+        assert!(is_disjoint(
+            "os_name == 'a' and platform_version == '1'",
+            "'2' == platform_version and os_name == 'a'"
+        ));
+        assert!(!is_disjoint(
+            "os_name == 'a' or platform_version == '1'",
+            "os_name == 'a' or platform_version == '2'"
+        ));
+
+        assert!(is_disjoint(
+            "sys_platform == 'darwin' and implementation_name == 'pypy'",
+            "sys_platform == 'bar' or implementation_name == 'foo'",
+        ));
+        assert!(is_disjoint(
+            "sys_platform == 'bar' or implementation_name == 'foo'",
+            "sys_platform == 'darwin' and implementation_name == 'pypy'",
+        ));
+    }
+
+    #[test]
+    fn arbitrary() {
+        assert!(m("'wat' == 'wat'").is_true());
+    }
+
+    #[test]
+    fn test_is_false() {
+        assert!(m("python_version < '3.10' and python_version >= '3.10'").is_false());
+        assert!(m("(python_version < '3.10' and python_version >= '3.10') \
+              or (python_version < '3.9' and python_version >= '3.9')",)
+        .is_false());
+
+        assert!(!m("python_version < '3.10'").is_false());
+        assert!(!m("python_version < '0'").is_false());
+        assert!(!m("python_version < '3.10' and python_version >= '3.9'").is_false());
+        assert!(!m("python_version < '3.10' or python_version >= '3.11'").is_false());
+    }
+
+    fn test_version_bounds_disjointness(version: &str) {
+        assert!(!is_disjoint(
+            format!("{version} > '2.7.0'"),
+            format!("{version} == '3.6.0'")
+        ));
+        assert!(!is_disjoint(
+            format!("{version} >= '3.7.0'"),
+            format!("{version} == '3.7.1'")
+        ));
+        assert!(!is_disjoint(
+            format!("{version} >= '3.7.0'"),
+            format!("'3.7.1' == {version}")
+        ));
+
+        assert!(is_disjoint(
+            format!("{version} >= '3.7.1'"),
+            format!("{version} == '3.7.0'")
+        ));
+        assert!(is_disjoint(
+            format!("'3.7.1' <= {version}"),
+            format!("{version} == '3.7.0'")
+        ));
+
+        assert!(is_disjoint(
+            format!("{version} < '3.7.0'"),
+            format!("{version} == '3.7.0'")
+        ));
+        assert!(is_disjoint(
+            format!("'3.7.0' > {version}"),
+            format!("{version} == '3.7.0'")
+        ));
+        assert!(is_disjoint(
+            format!("{version} < '3.7.0'"),
+            format!("{version} == '3.7.1'")
+        ));
+
+        assert!(is_disjoint(
+            format!("{version} == '3.7.0'"),
+            format!("{version} == '3.7.1'")
+        ));
+        assert!(is_disjoint(
+            format!("{version} == '3.7.0'"),
+            format!("{version} != '3.7.0'")
+        ));
+    }
+
+    fn assert_simplifies(left: &str, right: &str) {
+        assert_eq!(m(left), m(right));
+        assert_eq!(m(left).try_to_string().unwrap(), right);
+    }
+
+    fn assert_true(marker: &str) {
+        assert!(m(marker).is_true(), "{} != true", marker);
+    }
+
+    fn is_disjoint(left: impl AsRef<str>, right: impl AsRef<str>) -> bool {
+        m(left.as_ref()).is_disjoint(&m(right.as_ref()))
+    }
+}

@@ -39,6 +39,7 @@ url = { workspace = true, features = ["serde"] }
 uv-fs = { workspace = true }
 uv-normalize = { workspace = true }
 boxcar = "0.2.5"
+smallvec = "1.13.2"
 
 [dev-dependencies]
 insta = { version = "1.36.1" }

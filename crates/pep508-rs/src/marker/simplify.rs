@@ -35,6 +35,10 @@ pub(crate) fn to_dnf(tree: &MarkerTree) -> Vec<Vec<MarkerExpression>> {
             }
 
             for (i, skip_clause) in solution.iter().enumerate() {
+                if redundant_clauses.contains(&i) {
+                    continue;
+                }
+
                 let negation = skip_clause.negate();
                 if other_solution.iter().all(|clause| {
                     if clause == skip_clause {
@@ -51,7 +55,8 @@ pub(crate) fn to_dnf(tree: &MarkerTree) -> Vec<Vec<MarkerExpression>> {
             }
         }
 
-        for clause in redundant_clauses.into_iter().rev() {
+        redundant_clauses.sort_by(|a, b| b.cmp(a));
+        for clause in redundant_clauses {
             dnf[i].remove(clause);
         }
     }

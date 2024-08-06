@@ -1501,8 +1501,8 @@ fn lock_upgrade_log_multi_version() -> Result<()> {
             version = 1
             requires-python = ">=3.12"
             environment-markers = [
-                "sys_platform == 'win32'",
                 "sys_platform != 'win32'",
+                "sys_platform == 'win32'",
             ]
             exclude-newer = "2024-03-25 00:00:00 UTC"
 
@@ -4052,8 +4052,8 @@ fn lock_same_version_multiple_urls() -> Result<()> {
         version = 1
         requires-python = ">=3.12"
         environment-markers = [
-            "sys_platform == 'darwin'",
             "sys_platform != 'darwin'",
+            "sys_platform == 'darwin'",
         ]
         exclude-newer = "2024-03-25 00:00:00 UTC"
 

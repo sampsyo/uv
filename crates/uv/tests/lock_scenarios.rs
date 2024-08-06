@@ -2868,8 +2868,8 @@ fn preferences_dependent_forking() -> Result<()> {
         version = 1
         requires-python = ">=3.8"
         environment-markers = [
-            "sys_platform == 'linux'",
             "sys_platform != 'linux'",
+            "sys_platform == 'linux'",
         ]
 
         [[distribution]]

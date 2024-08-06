@@ -171,6 +171,8 @@ pub(crate) fn parse_marker_key_op_value<T: Pep508Url>(
                     MarkerWarningKind::LexicographicComparison,
                     format!("Can't compare strings with `~=`, will be ignored"),
                 );
+
+                return Ok(None);
             }
 
             Some(MarkerExpression::String {

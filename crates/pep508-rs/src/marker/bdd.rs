@@ -122,10 +122,9 @@ impl InternerGuard<'_> {
     /// Returns a boolean variable representing a marker expression.
     pub(crate) fn terminal(&mut self, expr: MarkerExpression) -> NodeId {
         let (var, children) = match expr {
-            MarkerExpression::Version { key, specifier } => (
-                Variable::Version(key.clone()),
-                RangeMap::from_specifier(key, specifier),
-            ),
+            MarkerExpression::Version { key, specifier } => {
+                (Variable::Version(key), RangeMap::from_specifier(specifier))
+            }
             MarkerExpression::String {
                 key,
                 operator: MarkerOperator::In,
@@ -248,7 +247,7 @@ impl InternerGuard<'_> {
         let node = self.shared.node(i);
         if let RangeMap::Version { ref map } = node.children {
             if let Some(allowed) = f(&node.var) {
-                let mut simplified = Vec::new();
+                let mut simplified = SmallVec::new();
                 for (range, node) in map {
                     let restricted = range.intersection(&allowed);
                     if restricted.is_empty() {
@@ -288,69 +287,6 @@ where
     }
 }
 
-fn compare_range_start<T>(range1: &Range<T>, range2: &Range<T>) -> Ordering
-where
-    T: Ord,
-{
-    let (start1, _) = range1.bounding_range().unwrap();
-    let (start2, _) = range2.bounding_range().unwrap();
-
-    match (start1, start2) {
-        (Bound::Unbounded, _) => Ordering::Less,
-        (_, Bound::Unbounded) => Ordering::Greater,
-        (Bound::Included(version1), Bound::Excluded(version2)) if version1 == version2 => {
-            Ordering::Less
-        }
-        (Bound::Excluded(version1), Bound::Included(version2)) if version1 == version2 => {
-            Ordering::Greater
-        }
-        (
-            Bound::Included(version1) | Bound::Excluded(version1),
-            Bound::Included(version2) | Bound::Excluded(version2),
-        ) => version1.cmp(version2),
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct NodeId(usize);
-
-impl NodeId {
-    pub(crate) const FALSE: NodeId = NodeId(0);
-    pub(crate) const TRUE: NodeId = NodeId(1);
-
-    const fn new(index: usize, negated: bool) -> NodeId {
-        NodeId(((index + 1) << 1) | (negated as usize))
-    }
-
-    pub(crate) fn is_false(self) -> bool {
-        self == NodeId::FALSE
-    }
-
-    pub(crate) fn is_true(self) -> bool {
-        self == NodeId::TRUE
-    }
-
-    pub(crate) fn not(self) -> NodeId {
-        NodeId(self.0 ^ 1)
-    }
-
-    pub(crate) fn negate(self, parent: NodeId) -> NodeId {
-        if parent.is_complement() {
-            self.not()
-        } else {
-            self
-        }
-    }
-
-    fn index(self) -> usize {
-        (self.0 >> 1) - 1
-    }
-
-    fn is_complement(self) -> bool {
-        (self.0 & 1) == 1
-    }
-}
-
 #[derive(PartialEq, Eq, Hash, Clone)]
 pub(crate) struct Node {
     pub(crate) var: Variable,
@@ -366,11 +302,21 @@ impl Node {
     }
 }
 
+// Enough two equalities and three complement ranges.
+type SmallVec<T> = smallvec::SmallVec<[T; 5]>;
+
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub(crate) enum RangeMap {
-    Version { map: Vec<(Range<Version>, NodeId)> },
-    String { map: Vec<(Range<String>, NodeId)> },
-    Boolean { high: NodeId, low: NodeId },
+    Version {
+        map: SmallVec<(Range<Version>, NodeId)>,
+    },
+    String {
+        map: SmallVec<(Range<String>, NodeId)>,
+    },
+    Boolean {
+        high: NodeId,
+        low: NodeId,
+    },
 }
 
 impl RangeMap {
@@ -395,24 +341,24 @@ impl RangeMap {
                     low: low2,
                 },
             ) => RangeMap::Boolean {
-                high: f(*high, *high2),
-                low: f(*low, *low2),
+                high: f(high.negate(parent), high2.negate(parent)),
+                low: f(low.negate(parent), low2.negate(parent)),
             },
             _ => unreachable!(),
         }
     }
 
     fn merge_ranges<T>(
-        map: &Vec<(Range<T>, NodeId)>,
+        map: &SmallVec<(Range<T>, NodeId)>,
         parent: NodeId,
-        map2: &Vec<(Range<T>, NodeId)>,
+        map2: &SmallVec<(Range<T>, NodeId)>,
         parent2: NodeId,
         mut f: impl FnMut(NodeId, NodeId) -> NodeId,
-    ) -> Vec<(Range<T>, NodeId)>
+    ) -> SmallVec<(Range<T>, NodeId)>
     where
         T: Clone + Ord + fmt::Debug,
     {
-        let mut combined: Vec<(Range<T>, NodeId)> = Vec::new();
+        let mut combined = SmallVec::new();
         for (range, node) in map.iter() {
             for (range2, node2) in map2.iter() {
                 let intersection = range2.intersection(&range);
@@ -472,12 +418,13 @@ impl RangeMap {
 
     fn from_string(operator: MarkerOperator, value: String) -> RangeMap {
         let range: Range<String> = match operator {
-            MarkerOperator::Equal | MarkerOperator::TildeEqual => Range::singleton(value),
+            MarkerOperator::Equal => Range::singleton(value),
             MarkerOperator::NotEqual => Range::singleton(value).complement(),
             MarkerOperator::GreaterThan => Range::strictly_higher_than(value),
             MarkerOperator::GreaterEqual => Range::higher_than(value),
             MarkerOperator::LessThan => Range::strictly_lower_than(value),
             MarkerOperator::LessEqual => Range::lower_than(value),
+            MarkerOperator::TildeEqual => unreachable!("string comparisons with ~= are ignored"),
             _ => unreachable!(),
         };
 
@@ -486,7 +433,7 @@ impl RangeMap {
         }
     }
 
-    fn from_specifier(key: MarkerValueVersion, specifier: VersionSpecifier) -> RangeMap {
+    fn from_specifier(specifier: VersionSpecifier) -> RangeMap {
         // The decision diagram relies on the assumption that the negation of a marker tree
         // is the complement of the marker space. However, pre-release versions violate
         // this assumption. For example, the marker `python_version > '3.9' or python_version <= '3.9'`
@@ -502,13 +449,13 @@ impl RangeMap {
         }
     }
 
-    fn from_range<T>(range: Range<T>) -> Vec<(Range<T>, NodeId)>
+    fn from_range<T>(range: Range<T>) -> SmallVec<(Range<T>, NodeId)>
     where
         T: Ord + Clone + fmt::Debug,
     {
         let complement = range.complement();
 
-        let mut versions: Vec<(Range<T>, NodeId)> = Vec::new();
+        let mut versions = SmallVec::new();
         for (start, end) in range.iter() {
             let range = Range::from_range_bounds((start.clone(), end.clone()));
             versions.push((range, NodeId::TRUE));
@@ -533,7 +480,7 @@ impl RangeMap {
             RangeMap::String { map } => {
                 Either::Left(Either::Right(map.iter().map(|(_, node)| *node)))
             }
-            RangeMap::Boolean { high, low } => Either::Right([*low, *high].into_iter()),
+            RangeMap::Boolean { high, low } => Either::Right([*high, *low].into_iter()),
         }
     }
 
@@ -556,6 +503,69 @@ impl RangeMap {
                 low: low.not(),
             },
         }
+    }
+}
+
+fn compare_range_start<T>(range1: &Range<T>, range2: &Range<T>) -> Ordering
+where
+    T: Ord,
+{
+    let (start1, _) = range1.bounding_range().unwrap();
+    let (start2, _) = range2.bounding_range().unwrap();
+
+    match (start1, start2) {
+        (Bound::Unbounded, _) => Ordering::Less,
+        (_, Bound::Unbounded) => Ordering::Greater,
+        (Bound::Included(version1), Bound::Excluded(version2)) if version1 == version2 => {
+            Ordering::Less
+        }
+        (Bound::Excluded(version1), Bound::Included(version2)) if version1 == version2 => {
+            Ordering::Greater
+        }
+        (
+            Bound::Included(version1) | Bound::Excluded(version1),
+            Bound::Included(version2) | Bound::Excluded(version2),
+        ) => version1.cmp(version2),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct NodeId(usize);
+
+impl NodeId {
+    pub(crate) const TRUE: NodeId = NodeId(0);
+    pub(crate) const FALSE: NodeId = NodeId(1);
+
+    const fn new(index: usize, negated: bool) -> NodeId {
+        NodeId(((index + 1) << 1) | (negated as usize))
+    }
+
+    pub(crate) fn is_false(self) -> bool {
+        self == NodeId::FALSE
+    }
+
+    pub(crate) fn is_true(self) -> bool {
+        self == NodeId::TRUE
+    }
+
+    pub(crate) fn not(self) -> NodeId {
+        NodeId(self.0 ^ 1)
+    }
+
+    pub(crate) fn negate(self, parent: NodeId) -> NodeId {
+        if parent.is_complement() {
+            self.not()
+        } else {
+            self
+        }
+    }
+
+    fn index(self) -> usize {
+        (self.0 >> 1) - 1
+    }
+
+    fn is_complement(self) -> bool {
+        (self.0 & 1) == 1
     }
 }
 
@@ -643,10 +653,7 @@ pub(crate) enum Variable {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        marker::bdd::{Interner, NodeId},
-        MarkerExpression,
-    };
+    use crate::{marker::bdd::NodeId, MarkerExpression};
 
     use super::BDD;
 
@@ -657,7 +664,6 @@ mod tests {
     #[test]
     fn basic() {
         let m = &*BDD;
-
         let a = expr("extra == 'foo'");
         assert!(!a.is_false());
 
@@ -698,7 +704,6 @@ mod tests {
     #[test]
     fn version() {
         let m = &*BDD;
-
         let a = expr("python_version == '3'");
         let b = expr("python_version != '3'");
         let c = expr("python_version >= '3'");
@@ -729,26 +734,6 @@ mod tests {
         let x = expr("platform_machine == 'x86_64'");
         let n = expr("platform_machine != 'x86_64'");
         let w = expr("platform_machine == 'Windows'");
-
         assert_eq!(m.or(m.and(x, w), m.and(n, w)), w);
-    }
-
-    #[test]
-    #[ignore]
-    fn bench() {
-        for i in (0..10_000).step_by(25) {
-            let m = Interner::default();
-
-            let y: Vec<_> = (0..i)
-                .map(|i| expr(&format!("python_version == '{i}'")))
-                .collect();
-
-            let x = std::time::Instant::now();
-            let mut z = NodeId::TRUE;
-            for x in y {
-                z = m.or(x, z);
-            }
-            println!("OR {i} variables took {:?}", x.elapsed());
-        }
     }
 }
