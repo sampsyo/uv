@@ -9,7 +9,7 @@ use thiserror::Error;
 use pep440_rs::{Operator, Prerelease, Version, VersionSpecifier, VersionSpecifiers};
 
 #[derive(Debug, Error)]
-pub enum PubGrubSpecifierError {
+pub(crate) enum PubGrubSpecifierError {
     #[error("~= operator requires at least two release segments: `{0}`")]
     InvalidTildeEquals(VersionSpecifier),
 }

@@ -1,3 +1,6 @@
+// TODO
+#![allow(missing_docs)]
+
 use std::collections::HashSet;
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Bound, Deref};
