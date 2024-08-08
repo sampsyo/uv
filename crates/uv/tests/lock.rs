@@ -1,11 +1,13 @@
 #![cfg(all(feature = "python", feature = "pypi"))]
 
 use anyhow::Result;
+use assert_cmd::assert::OutputAssertExt;
 use assert_fs::prelude::*;
 use indoc::{formatdoc, indoc};
 use insta::assert_snapshot;
 use url::Url;
 
+use crate::common::packse_index_url;
 use common::{uv_snapshot, TestContext};
 
 mod common;
@@ -5279,5 +5281,44 @@ fn lock_no_sources() -> Result<()> {
         );
     });
 
+    Ok(())
+}
+
+/// Check that we discard the fork marker from the lockfile when using `--upgrade`.
+#[test]
+fn lock_upgrade_drop_fork_markers() -> Result<()> {
+    let context = TestContext::new("3.12");
+
+    let requirements = r#"[project]
+    name = "forking"
+    version = "0.1.0"
+    requires-python = ">=3.12"
+    dependencies = ["fork-upgrade-foo==1"]
+    "#;
+
+    let pyproject_toml = context.temp_dir.child("pyproject.toml");
+    pyproject_toml.write_str(requirements)?;
+    context
+        .lock()
+        .arg("--index-url")
+        .arg(packse_index_url())
+        .env_remove("UV_EXCLUDE_NEWER")
+        .assert()
+        .success();
+    let lock = fs_err::read_to_string(context.temp_dir.join("uv.lock")).unwrap();
+    assert!(lock.contains("environment-markers"));
+
+    // Remove the bound and lock with `--upgrade`.
+    pyproject_toml.write_str(&requirements.replace("fork-upgrade-foo==1", "fork-upgrade-foo"))?;
+    context
+        .lock()
+        .arg("--index-url")
+        .arg(packse_index_url())
+        .env_remove("UV_EXCLUDE_NEWER")
+        .arg("--upgrade")
+        .assert()
+        .success();
+    let lock = fs_err::read_to_string(context.temp_dir.join("uv.lock")).unwrap();
+    assert!(!lock.contains("environment-markers"));
     Ok(())
 }
